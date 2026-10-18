@@ -9,9 +9,9 @@ pub mod module;
 pub mod module_store;
 pub mod native_function;
 pub mod pair;
+pub mod reader;
 #[cfg(feature = "repl")]
 pub mod repl;
-pub mod reader;
 pub mod source_map;
 pub mod symbol;
 mod tokenizer;

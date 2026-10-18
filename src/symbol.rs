@@ -20,6 +20,7 @@ pub struct SymbolTable {
 }
 
 impl Symbol {
+    pub const UNDERSCORE: Symbol = Symbol::must_inline("_");
     pub const BEGIN: Symbol = Symbol::must_inline("begin");
     pub const DEFINE: Symbol = Symbol::must_inline("define");
     pub const IF: Symbol = Symbol::must_inline("if");

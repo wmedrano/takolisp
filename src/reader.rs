@@ -64,9 +64,9 @@ impl<'a> Atom<'a> {
 }
 
 /// A trait that is used with [`Reader`] to inspect a string as Lisp datastructures.
-pub trait ReadVisitor {
+pub trait ReadVisitor<'src> {
     /// Signals that a value has been visited. Note that this does not include lists.
-    fn visit_atom(&mut self, span: Span, val: Atom);
+    fn visit_atom(&mut self, span: Span, val: Atom<'src>);
     /// A list has been started.
     fn start_list(&mut self, span: Span);
     /// A list has just ended.
@@ -86,7 +86,7 @@ impl<'a> Reader<'a> {
     /// Read the next item with `visitor`.
     ///
     /// Returns `None` if there are no more items.
-    pub fn read(&mut self, visitor: &mut impl ReadVisitor) -> Option<Result<(), ReadError>> {
+    pub fn read(&mut self, visitor: &mut impl ReadVisitor<'a>) -> Option<Result<(), ReadError>> {
         loop {
             let (leading_kind, leading_token) = self.tokenizer.next_span()?;
             let res = match leading_kind {
@@ -134,7 +134,7 @@ impl<'a> Reader<'a> {
     fn read_expr(
         &mut self,
         start_span: Span,
-        visitor: &mut impl ReadVisitor,
+        visitor: &mut impl ReadVisitor<'a>,
     ) -> Result<(), ReadError> {
         visitor.start_list(start_span.clone());
         let mut depth: u32 = 1;
@@ -194,7 +194,7 @@ impl<'a> Reader<'a> {
         Atom::Symbol(token)
     }
 
-    fn parse_string(&self, token: &str) -> Atom<'_> {
+    fn parse_string<'b>(&self, token: &'b str) -> Atom<'b> {
         let expected_len = token.len().saturating_sub(2);
         let mut ret = String::with_capacity(expected_len);
         let text = &token[1..expected_len + 1];
@@ -242,7 +242,7 @@ impl<'a> ValReadVisitor<'a> {
     }
 }
 
-impl<'a> ReadVisitor for ValReadVisitor<'a> {
+impl ReadVisitor<'_> for ValReadVisitor<'_> {
     fn visit_atom(&mut self, _span: Span, atom: Atom) {
         match self.expr_stack.last_mut() {
             Some(vals) => {
@@ -474,7 +474,7 @@ mod tests {
     fn comments_are_reported_to_visitors_inside_and_outside_lists() {
         #[derive(Default)]
         struct CommentVisitor(Vec<(Span, String)>);
-        impl ReadVisitor for CommentVisitor {
+        impl ReadVisitor<'_> for CommentVisitor {
             fn visit_atom(&mut self, _span: Span, _atom: Atom) {}
             fn start_list(&mut self, _span: Span) {}
             fn end_list(&mut self, _span: Span) {}
