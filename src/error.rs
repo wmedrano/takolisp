@@ -30,6 +30,8 @@ pub enum CompilerErrorKind {
     ImmutableSymbol(Symbol),
     /// A lookup used a namespace, which is not yet supported.
     UnsupportedNamespace(Symbol),
+    /// An `import` form was compiled, which is not yet supported.
+    UnsupportedImport,
 }
 
 impl CompilerError {
@@ -71,6 +73,7 @@ impl std::fmt::Display for CompilerError {
             CompilerErrorKind::UnsupportedNamespace(_) => {
                 f.write_str("namespace lookups are not yet supported")
             }
+            CompilerErrorKind::UnsupportedImport => f.write_str("imports are not yet supported"),
         }
     }
 }
@@ -280,18 +283,88 @@ fn write_ast_error(
         AstErrorKind::Form(FormErrorKind::EmptySymbolName) => f.write_str(
             "qualified symbol must have a name after the final '/', e.g. namespace/name",
         )?,
-        AstErrorKind::Form(FormErrorKind::LambdaMissingParameterListAndBody) => f.write_str(
-            "lambda expects a parameter list and a body, e.g. (lambda (x) (+ x 1))",
+        // The form errors below are in `FormErrorKind` order.
+        // `define` forms.
+        AstErrorKind::Form(FormErrorKind::DefineMissingNameAndValueOrFunctionDefinition) => {
+            f.write_str(
+                "define expects a name and a value, or a function definition, e.g. (define name value) or (define (name arg) body)",
+            )?
+        }
+        AstErrorKind::Form(FormErrorKind::DefineMissingValueOrFunctionBody) => f.write_str(
+            "define expects a value after the name, e.g. (define name value), or a function body, e.g. (define (name arg) body)",
         )?,
-        AstErrorKind::Form(FormErrorKind::LambdaMissingBody) => f.write_str(
-            "lambda expects a body after its parameter list, e.g. (lambda () body)",
+        AstErrorKind::Form(FormErrorKind::DefineTooManyArguments(found)) => write!(
+            f,
+            "define expects a name/value pair or a function definition, found {found} arguments; e.g. (define name value) or (define (name arg) body)"
         )?,
+        AstErrorKind::Form(FormErrorKind::DefineInvalidName) => f.write_str(
+            "define expects an unqualified symbol name, e.g. (define name value) or (define (name arg) body)",
+        )?,
+        // `import` forms.
+        AstErrorKind::Form(FormErrorKind::ImportMissingPath) => f.write_str(
+            "import expects a path, e.g. (import \"path/to/file.tk\") or (import \"path/to/file.tk\" as file)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::ImportMissingAlias) => f.write_str(
+            "import expects an alias after as, e.g. (import \"path/to/file.tk\" as file)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::ImportTooManyArguments(found)) => write!(
+            f,
+            "import expects a path, optionally followed by as and an alias, found {found} arguments; e.g. (import \"path/to/file.tk\") or (import \"path/to/file.tk\" as file)"
+        )?,
+        AstErrorKind::Form(FormErrorKind::ImportInvalidPath) => f.write_str(
+            "import expects a string literal path that names a file, e.g. (import \"path/to/file.tk\")",
+        )?,
+        AstErrorKind::Form(FormErrorKind::ImportInvalidAliasSeparator) => f.write_str(
+            "import expects as before its alias, e.g. (import \"path/to/file.tk\" as file)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::ImportInvalidAliasName) => f.write_str(
+            "import expects an unqualified symbol alias, e.g. (import \"path/to/file.tk\" as file)",
+        )?,
+        // `let` forms.
         AstErrorKind::Form(FormErrorKind::LetMissingBindingListAndBody) => f.write_str(
             "let expects a binding list and a body, e.g. (let ((name value)) body)",
         )?,
         AstErrorKind::Form(FormErrorKind::LetMissingBody) => f.write_str(
             "let expects a body after the binding list, e.g. (let ((name value)) body)",
         )?,
+        AstErrorKind::Form(FormErrorKind::LetInvalidBindingList) => f.write_str(
+            "let expects a binding list containing name/value pairs, e.g. (let ((name value)) body)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::LetInvalidBinding) => f.write_str(
+            "let expects each binding to be a name/value pair, e.g. (let ((name value)) body)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::InvalidBindingArity(found)) => write!(
+            f,
+            "let binding expects exactly 2 elements: a name and a value, found {found}; e.g. (name value)"
+        )?,
+        AstErrorKind::Form(FormErrorKind::LetInvalidBindingName) => {
+            f.write_str("let binding names must be unqualified symbols")?
+        }
+        // `set!` forms.
+        AstErrorKind::Form(FormErrorKind::SetMissingNameAndValue) => f.write_str(
+            "set! expects a name and a value, e.g. (set! name value)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::SetMissingValue) => f.write_str(
+            "set! expects a value after the name, e.g. (set! name value)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::SetTooManyArguments(found)) => write!(
+            f,
+            "set! expects exactly 2 arguments: a name and a value, found {found}; e.g. (set! name value)"
+        )?,
+        AstErrorKind::Form(FormErrorKind::SetInvalidName) => f.write_str(
+            "set! expects an unqualified symbol name, e.g. (set! name value)",
+        )?,
+        // `lambda` forms.
+        AstErrorKind::Form(FormErrorKind::LambdaMissingParameterListAndBody) => f.write_str(
+            "lambda expects a parameter list and a body, e.g. (lambda (x) (+ x 1))",
+        )?,
+        AstErrorKind::Form(FormErrorKind::LambdaMissingBody) => f.write_str(
+            "lambda expects a body after its parameter list, e.g. (lambda () body)",
+        )?,
+        AstErrorKind::Form(FormErrorKind::LambdaInvalidParameter) => f.write_str(
+            "lambda expects a parameter list containing only unqualified symbols, e.g. (lambda (x y) (+ x y))",
+        )?,
+        // `if` and `when` forms.
         AstErrorKind::Form(FormErrorKind::IfMissingConditionAndBranches) => f.write_str(
             "if expects a condition, a true-case value, and optionally a false-case value, e.g. (if condition then-value else-value)",
         )?,
@@ -306,53 +379,10 @@ fn write_ast_error(
             f,
             "when expects a condition followed by one or more body expressions, e.g. (when condition body)"
         )?,
+        // `return` forms.
         AstErrorKind::Form(FormErrorKind::ReturnTooManyArguments(found)) => write!(
             f,
             "return expects zero or one value, found {found} arguments; e.g. (return) or (return value)"
-        )?,
-        AstErrorKind::Form(FormErrorKind::DefineMissingNameAndValueOrFunctionDefinition) => {
-            f.write_str(
-                "define expects a name and a value, or a function definition, e.g. (define name value) or (define (name arg) body)",
-            )?
-        }
-        AstErrorKind::Form(FormErrorKind::DefineMissingValueOrFunctionBody) => f.write_str(
-            "define expects a value after the name, e.g. (define name value), or a function body, e.g. (define (name arg) body)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::DefineTooManyArguments(found)) => write!(
-            f,
-            "define expects a name/value pair or a function definition, found {found} arguments; e.g. (define name value) or (define (name arg) body)"
-        )?,
-        AstErrorKind::Form(FormErrorKind::SetMissingNameAndValue) => f.write_str(
-            "set! expects a name and a value, e.g. (set! name value)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::SetMissingValue) => f.write_str(
-            "set! expects a value after the name, e.g. (set! name value)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::SetTooManyArguments(found)) => write!(
-            f,
-            "set! expects exactly 2 arguments: a name and a value, found {found}; e.g. (set! name value)"
-        )?,
-        AstErrorKind::Form(FormErrorKind::SetInvalidName) => f.write_str(
-            "set! expects an unqualified symbol name, e.g. (set! name value)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::LambdaInvalidParameter) => f.write_str(
-            "lambda expects a parameter list containing only unqualified symbols, e.g. (lambda (x y) (+ x y))",
-        )?,
-        AstErrorKind::Form(FormErrorKind::LetInvalidBindingName) => {
-            f.write_str("let binding names must be unqualified symbols")?
-        }
-        AstErrorKind::Form(FormErrorKind::DefineInvalidName) => f.write_str(
-            "define expects an unqualified symbol name, e.g. (define name value) or (define (name arg) body)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::InvalidBindingArity(found)) => write!(
-            f,
-            "let binding expects exactly 2 elements: a name and a value, found {found}; e.g. (name value)"
-        )?,
-        AstErrorKind::Form(FormErrorKind::LetInvalidBindingList) => f.write_str(
-            "let expects a binding list containing name/value pairs, e.g. (let ((name value)) body)",
-        )?,
-        AstErrorKind::Form(FormErrorKind::LetInvalidBinding) => f.write_str(
-            "let expects each binding to be a name/value pair, e.g. (let ((name value)) body)",
         )?,
     }
     writeln!(f)?;
@@ -389,6 +419,7 @@ fn write_compiler_error(
             "namespace lookups are not yet supported: {}",
             vm.heap().symbols.display_symbol(*namespace)
         )?,
+        CompilerErrorKind::UnsupportedImport => writeln!(f, "imports are not yet supported")?,
     }
     write_span_context(f, source, error.span.clone(), color, location_color, reset)
 }

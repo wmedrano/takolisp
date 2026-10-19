@@ -49,9 +49,12 @@ pub enum AstKind<'a> {
         symbol: Symbol,
     },
 
-    // Binding and assignment, which associate a symbol with a value.
+    /// Binding and assignment, which associate a symbol with a value
+    /// or a module.
     /// Evaluates `value` and defines it as a global `symbol`.
     Define { symbol: Symbol, value: &'a Ast<'a> },
+    /// Loads the module at `path` and binds it to `alias`.
+    Import { path: &'a str, alias: Symbol },
     /// Evaluates each binding in order and then the body.
     Let {
         bindings: &'a [LetBinding<'a>],
@@ -304,6 +307,31 @@ mod tests {
                     span: start..start + 4,
                 },
                 "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_in_any_position_is_error() {
+        for (source, span) in [
+            ("(import \"path/to/file.tk\" as file)", 0..34),
+            ("(define x (import \"a.tk\"))", 10..25),
+            ("(lambda () (import \"a.tk\"))", 11..26),
+        ] {
+            let bump = Bump::new();
+            let mut vm = Vm::default();
+            let module = vm
+                .create_root_module(ModuleSource::Internal("test"))
+                .unwrap();
+            let ast = must_parse(source, &bump, vm.heap_mut());
+
+            assert_eq!(
+                compile_in_module(&ast, &mut vm, module).unwrap_err(),
+                CompilerError {
+                    kind: crate::error::CompilerErrorKind::UnsupportedImport,
+                    span,
+                },
+                "{source}",
             );
         }
     }

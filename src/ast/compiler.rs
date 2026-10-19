@@ -102,6 +102,12 @@ impl<'a> CompilerContext<'a> {
                     self.emit(Instruction::Return);
                 }
             }
+            AstKind::Import { .. } => {
+                return Err(CompilerError {
+                    kind: CompilerErrorKind::UnsupportedImport,
+                    span: ast.span.clone(),
+                });
+            }
             AstKind::Let { bindings, body } => {
                 self.compile_let(bindings, body, return_expression)?
             }

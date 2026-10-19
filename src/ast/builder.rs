@@ -70,30 +70,46 @@ pub enum FormErrorKind {
     EmptyExpression,
     /// A qualified symbol had no name after its final namespace separator.
     EmptySymbolName,
-    /// A `lambda` form was missing its parameter list and body.
-    LambdaMissingParameterListAndBody,
-    /// A `lambda` form was missing its body.
-    LambdaMissingBody,
-    /// A `let` form was missing its binding list and body.
-    LetMissingBindingListAndBody,
-    /// A `let` form was missing its body.
-    LetMissingBody,
-    /// An `if` form was missing its condition and branches.
-    IfMissingConditionAndBranches,
-    /// An `if` form was missing its branches.
-    IfMissingBranches,
-    /// An `if` form had too many operands.
-    IfTooManyArguments(usize),
-    /// A `when` form was missing its condition and body.
-    WhenMissingConditionAndBody,
-    /// A `return` form had too many operands.
-    ReturnTooManyArguments(usize),
+    // The remaining variants are in `AstKind` order, grouped by the form that reports them.
+    // `define` forms.
     /// A `define` form was missing its name and value or function definition.
     DefineMissingNameAndValueOrFunctionDefinition,
     /// A `define` form was missing its value or function body.
     DefineMissingValueOrFunctionBody,
     /// A `define` form had too many operands.
     DefineTooManyArguments(usize),
+    /// A `define` form contained a name that was not an unqualified symbol.
+    DefineInvalidName,
+
+    // `import` forms.
+    /// An `import` form was missing its path.
+    ImportMissingPath,
+    /// An `import ... as` form was missing its alias.
+    ImportMissingAlias,
+    /// An `import` form had too many operands.
+    ImportTooManyArguments(usize),
+    /// An `import` form had a path that was not a string literal or that named no file.
+    ImportInvalidPath,
+    /// An `import` form did not separate its alias with `as`.
+    ImportInvalidAliasSeparator,
+    /// An `import` form contained an alias that was not an unqualified symbol.
+    ImportInvalidAliasName,
+
+    // `let` forms.
+    /// A `let` form was missing its binding list and body.
+    LetMissingBindingListAndBody,
+    /// A `let` form was missing its body.
+    LetMissingBody,
+    /// A `let` form did not contain a binding list.
+    LetInvalidBindingList,
+    /// A `let` binding was not a name/value pair.
+    LetInvalidBinding,
+    /// A `let` binding had the wrong number of elements.
+    InvalidBindingArity(usize),
+    /// A `let` form contained a binding name that was not an unqualified symbol.
+    LetInvalidBindingName,
+
+    // `set!` forms.
     /// A `set!` form was missing its name and value.
     SetMissingNameAndValue,
     /// A `set!` form was missing its value.
@@ -102,18 +118,28 @@ pub enum FormErrorKind {
     SetTooManyArguments(usize),
     /// A `set!` form contained a name that was not an unqualified symbol.
     SetInvalidName,
+
+    // `lambda` forms.
+    /// A `lambda` form was missing its parameter list and body.
+    LambdaMissingParameterListAndBody,
+    /// A `lambda` form was missing its body.
+    LambdaMissingBody,
     /// A `lambda` form contained a parameter that was not an unqualified symbol.
     LambdaInvalidParameter,
-    /// A `let` form contained a binding name that was not an unqualified symbol.
-    LetInvalidBindingName,
-    /// A `define` form contained a name that was not an unqualified symbol.
-    DefineInvalidName,
-    /// A `let` binding had the wrong number of elements.
-    InvalidBindingArity(usize),
-    /// A `let` form did not contain a binding list.
-    LetInvalidBindingList,
-    /// A `let` binding was not a name/value pair.
-    LetInvalidBinding,
+
+    // `if` and `when` forms.
+    /// An `if` form was missing its condition and branches.
+    IfMissingConditionAndBranches,
+    /// An `if` form was missing its branches.
+    IfMissingBranches,
+    /// An `if` form had too many operands.
+    IfTooManyArguments(usize),
+    /// A `when` form was missing its condition and body.
+    WhenMissingConditionAndBody,
+
+    // `return` forms.
+    /// A `return` form had too many operands.
+    ReturnTooManyArguments(usize),
 }
 
 /// The kind of error that occurred.
@@ -288,6 +314,7 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
         if let SexpKind::Symbol(head_name) = head.kind {
             match head_name {
                 "define" => return self.define(operands, span),
+                "import" => return self.import_form(operands, span),
                 "let" => return self.let_form(operands, span),
                 "set!" => return self.set(operands, span),
                 "lambda" => return self.lambda(operands, span),
@@ -350,6 +377,58 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
                 symbol,
                 value: self.bump.alloc(lambda),
             },
+            span,
+        }
+    }
+
+    /// `(import path)` or `(import path as alias)`, which binds the module at `path` to `alias`.
+    ///
+    /// Without `as`, the alias is the file stem of `path`, so `(import "a/b.tk")` and
+    /// `(import "a/b.tk" as b)` are the same form.
+    fn import_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let (path_sexp, alias_sexp) = match operands {
+            [] => return self.error(FormErrorKind::ImportMissingPath, span),
+            [path] => (path, None),
+            [_, separator] => {
+                // Without a third operand there is no alias to bind, so either `as` is the last
+                // operand or the separator itself is wrong.
+                return if matches!(separator.kind, SexpKind::Symbol("as")) {
+                    self.error(FormErrorKind::ImportMissingAlias, span)
+                } else {
+                    self.error(
+                        FormErrorKind::ImportInvalidAliasSeparator,
+                        separator.span.clone(),
+                    )
+                };
+            }
+            [path, separator, alias] => {
+                if !matches!(separator.kind, SexpKind::Symbol("as")) {
+                    self.error(
+                        FormErrorKind::ImportInvalidAliasSeparator,
+                        separator.span.clone(),
+                    );
+                }
+                (path, Some(alias))
+            }
+            _ => {
+                return self.error(FormErrorKind::ImportTooManyArguments(operands.len()), span);
+            }
+        };
+        // TODO: Consider reusing sexp. This avoids an allocation and
+        // possible reuses a string that is otherwise garage.
+        let Some(path) = self.string_text(path_sexp) else {
+            return self.invalid(path_sexp, FormErrorKind::ImportInvalidPath);
+        };
+        // The path must name a file even when the alias is explicit.
+        let Some(stem) = implicit_import_alias(path) else {
+            return self.error(FormErrorKind::ImportInvalidPath, path_sexp.span.clone());
+        };
+        let alias = match alias_sexp {
+            Some(sexp) => self.binding_name(sexp, FormErrorKind::ImportInvalidAliasName),
+            None => self.heap.symbols.create_symbol(stem),
+        };
+        Ast {
+            kind: AstKind::Import { path, alias },
             span,
         }
     }
@@ -581,6 +660,15 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
         }
     }
 
+    /// The text of a string literal sexp, copied into the bump, or `None` for any other sexp.
+    fn string_text(&mut self, sexp: &Sexp<'src>) -> Option<&'bump str> {
+        let SexpKind::Constant(Val::String(handle)) = &sexp.kind else {
+            return None;
+        };
+        let text = self.heap.strings.get(*handle)?;
+        Some(self.bump.alloc_str(text))
+    }
+
     /// Record `error` for a sexp that does not belong where it was found.
     ///
     /// The sexp is still built as an expression first so that errors nested inside of it are
@@ -613,6 +701,18 @@ fn split_namespace(name: &str) -> (Option<&str>, &str) {
         Some((namespace, symbol)) if name != "/" => (Some(namespace), symbol),
         _ => (None, name),
     }
+}
+
+/// The alias an `(import path)` form binds without an explicit `as` alias: the last component of
+/// `path` with its extension removed.
+///
+/// Returns `None` when `path` names no file, such as `""` or a trailing separator.
+fn implicit_import_alias(path: &str) -> Option<&str> {
+    let stem = path.rsplit('/').next().filter(|stem| !stem.is_empty())?;
+    Some(match stem.rfind('.') {
+        Some(dot) if dot > 0 && dot + 1 < stem.len() => &stem[..dot],
+        _ => stem,
+    })
 }
 
 #[cfg(test)]
@@ -796,7 +896,7 @@ mod tests {
         let bump = Bump::new();
         let mut heap = Heap::default();
         for name in [
-            "begin", "if", "when", "return", "define", "set!", "lambda", "let",
+            "begin", "if", "when", "return", "define", "import", "set!", "lambda", "let",
         ] {
             let source = format!("(ns/{name} x 42)");
             let ast = must_parse(&source, &bump, &mut heap);
@@ -1101,6 +1201,168 @@ mod tests {
                 span: 8..9,
             }],
         );
+    }
+
+    #[test]
+    fn import_with_explicit_alias_produces_import_expression() {
+        let bump = Bump::new();
+        let ast = must_parse(
+            "(import \"path/to/file.tk\" as file)",
+            &bump,
+            &mut Heap::default(),
+        );
+
+        assert_eq!(
+            ast,
+            Ast {
+                kind: AstKind::Import {
+                    path: "path/to/file.tk",
+                    alias: Symbol::must_inline("file"),
+                },
+                span: 0..34,
+            },
+        );
+    }
+
+    #[test]
+    fn import_without_alias_binds_file_stem_as_alias() {
+        // Tuple of source, expected_path, expected_alias
+        let test_cases = [
+            ("(import \"path/to/file.tk\")", "path/to/file.tk", "file"),
+            ("(import \"file\")", "file", "file"),
+            ("(import \"a.b.c\")", "a.b.c", "a.b"),
+            ("(import \".tkrc\")", ".tkrc", ".tkrc"),
+        ];
+        let mut bump = Bump::new();
+        for (source, expected_path, expected_alias) in test_cases {
+            bump.reset();
+            let ast = must_parse(source, &bump, &mut Heap::default());
+            assert_eq!(
+                ast.kind,
+                AstKind::Import {
+                    path: expected_path,
+                    alias: Symbol::must_inline(expected_alias),
+                },
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn import_path_with_escapes_produces_unescaped_path() {
+        let bump = Bump::new();
+        let ast = must_parse(
+            "(import \"path of\\n\\\"a\\\".tk\" as file)",
+            &bump,
+            &mut Heap::default(),
+        );
+
+        assert_eq!(
+            ast.kind,
+            AstKind::Import {
+                path: "path of\n\"a\".tk",
+                alias: Symbol::must_inline("file"),
+            },
+        );
+    }
+
+    #[test]
+    fn import_with_non_string_path_is_error() {
+        let test_cases = [
+            ("(import file)", 8..12),
+            ("(import 42)", 8..10),
+            ("(import (\"a\"))", 8..13),
+        ];
+        for (source, span) in test_cases {
+            assert_eq!(
+                must_error(source).as_slice(),
+                &[AstError {
+                    kind: AstErrorKind::Form(FormErrorKind::ImportInvalidPath),
+                    span,
+                }],
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn import_with_path_naming_no_file_is_error() {
+        let test_cases = [
+            ("(import)", FormErrorKind::ImportMissingPath, 0..8),
+            ("(import \"\")", FormErrorKind::ImportInvalidPath, 8..10),
+            (
+                "(import \"path/to/\")",
+                FormErrorKind::ImportInvalidPath,
+                8..18,
+            ),
+            (
+                "(import \"path/to/\" as file)",
+                FormErrorKind::ImportInvalidPath,
+                8..18,
+            ),
+        ];
+        for (source, kind, span) in test_cases {
+            assert_eq!(
+                must_error(source).as_slice(),
+                &[AstError {
+                    kind: AstErrorKind::Form(kind),
+                    span,
+                }],
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn import_without_as_separator_is_error() {
+        for (source, span) in [
+            ("(import \"a.tk\" file)", 15..19),
+            ("(import \"a.tk\" file extra)", 15..19),
+        ] {
+            assert_eq!(
+                must_error(source).as_slice(),
+                &[AstError {
+                    kind: AstErrorKind::Form(FormErrorKind::ImportInvalidAliasSeparator),
+                    span,
+                }],
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn import_with_invalid_alias_is_error() {
+        for (source, kind, span) in [
+            (
+                "(import \"a.tk\" as 1)",
+                FormErrorKind::ImportInvalidAliasName,
+                18..19,
+            ),
+            (
+                "(import \"a.tk\" as ns/a)",
+                FormErrorKind::ImportInvalidAliasName,
+                18..22,
+            ),
+            (
+                "(import \"a.tk\" as)",
+                FormErrorKind::ImportMissingAlias,
+                0..18,
+            ),
+            (
+                "(import \"a.tk\" as f x)",
+                FormErrorKind::ImportTooManyArguments(4),
+                0..22,
+            ),
+        ] {
+            assert_eq!(
+                must_error(source).as_slice(),
+                &[AstError {
+                    kind: AstErrorKind::Form(kind),
+                    span,
+                }],
+                "{source}",
+            );
+        }
     }
 
     #[test]
