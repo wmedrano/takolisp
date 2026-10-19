@@ -279,106 +279,26 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
     }
 
     /// A special form, or a function call if the list does not start with a special form name.
+    ///
+    /// The special forms, and the methods that build them, are in [`AstKind`] order.
     fn list(&mut self, items: &[Sexp<'src>], span: Span) -> Ast<'bump> {
         let Some((head, operands)) = items.split_first() else {
             return self.error(FormErrorKind::EmptyExpression, span);
         };
         if let SexpKind::Symbol(head_name) = head.kind {
             match head_name {
-                "begin" => return self.begin(operands, span),
-                "if" => return self.if_form(operands, span),
-                "when" => return self.when(operands, span),
-                "return" => return self.return_form(operands, span),
                 "define" => return self.define(operands, span),
+                "let" => return self.let_form(operands, span),
                 "set!" => return self.set(operands, span),
                 "lambda" => return self.lambda(operands, span),
-                "let" => return self.let_form(operands, span),
+                "if" => return self.if_form(operands, span),
+                "when" => return self.when(operands, span),
+                "begin" => return self.begin(operands, span),
+                "return" => return self.return_form(operands, span),
                 _ => {}
             }
         }
         self.call(head, operands, span)
-    }
-
-    /// `(function arg...)`
-    fn call(&mut self, function: &Sexp<'src>, args: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        let function = self.sexp_to_ast(function);
-        let args = self.sexps_to_asts(args);
-        Ast {
-            kind: AstKind::FunctionCall {
-                function: self.bump.alloc(function),
-                args,
-            },
-            span,
-        }
-    }
-
-    /// `(begin expr...)`
-    fn begin(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        Ast {
-            kind: AstKind::Begin(self.sexps_to_asts(operands)),
-            span,
-        }
-    }
-
-    /// `(if condition then-branch [else-branch])`
-    fn if_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        let (condition, then_branch, else_branch) = match operands {
-            [] => return self.error(FormErrorKind::IfMissingConditionAndBranches, span),
-            [_] => return self.error(FormErrorKind::IfMissingBranches, span),
-            [condition, then_branch] => (
-                self.sexp_to_ast(condition),
-                self.sexp_to_ast(then_branch),
-                undefined(span.clone()),
-            ),
-            [condition, then_branch, else_branch] => (
-                self.sexp_to_ast(condition),
-                self.sexp_to_ast(then_branch),
-                self.sexp_to_ast(else_branch),
-            ),
-            _ => {
-                return self.error(FormErrorKind::IfTooManyArguments(operands.len()), span);
-            }
-        };
-        Ast {
-            kind: AstKind::If {
-                condition: self.bump.alloc(condition),
-                then_branch: self.bump.alloc(then_branch),
-                else_branch: self.bump.alloc(else_branch),
-            },
-            span,
-        }
-    }
-
-    /// `(when condition body...)`, an `if` without an else branch.
-    fn when(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        let [condition, body @ ..] = operands else {
-            return self.error(FormErrorKind::WhenMissingConditionAndBody, span);
-        };
-        let condition = self.sexp_to_ast(condition);
-        let then_branch = self.body(body, span.clone());
-        Ast {
-            kind: AstKind::If {
-                condition: self.bump.alloc(condition),
-                then_branch: self.bump.alloc(then_branch),
-                else_branch: self.bump.alloc(undefined(span.clone())),
-            },
-            span,
-        }
-    }
-
-    /// `(return [value])`
-    fn return_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        let value = match operands {
-            [] => undefined(span.clone()),
-            [value] => self.sexp_to_ast(value),
-            _ => {
-                return self.error(FormErrorKind::ReturnTooManyArguments(operands.len()), span);
-            }
-        };
-        Ast {
-            kind: AstKind::Return(self.bump.alloc(value)),
-            span,
-        }
     }
 
     /// `(define name value)` or `(define (name parameter...) body...)`
@@ -431,6 +351,63 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
                 value: self.bump.alloc(lambda),
             },
             span,
+        }
+    }
+
+    /// `(let ((name value)...) body...)`
+    fn let_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let (bindings, body) = match operands {
+            [] => return self.error(FormErrorKind::LetMissingBindingListAndBody, span),
+            [_] => return self.error(FormErrorKind::LetMissingBody, span),
+            [bindings, body @ ..] => (bindings, body),
+        };
+        let SexpKind::List(bindings) = &bindings.kind else {
+            return self.error(FormErrorKind::LetInvalidBindingList, bindings.span.clone());
+        };
+        let bump = self.bump;
+        let bindings = BumpVec::from_iter_in(
+            bindings.iter().map(|binding| self.let_binding(binding)),
+            bump,
+        )
+        .into_bump_slice();
+        let body = self.body(body, span.clone());
+        Ast {
+            kind: AstKind::Let {
+                bindings,
+                body: bump.alloc(body),
+            },
+            span,
+        }
+    }
+
+    /// A single `(name value)` binding of a `let` form.
+    fn let_binding(&mut self, binding: &Sexp<'src>) -> LetBinding<'bump> {
+        let (symbol, value) = match &binding.kind {
+            SexpKind::List(items) => match items.as_slice() {
+                [name, value] => (
+                    self.binding_name(name, FormErrorKind::LetInvalidBindingName),
+                    self.sexp_to_ast(value),
+                ),
+                [] => (
+                    Symbol::UNDERSCORE,
+                    self.invalid(binding, FormErrorKind::LetInvalidBinding),
+                ),
+                _ => (
+                    Symbol::UNDERSCORE,
+                    self.error(
+                        FormErrorKind::InvalidBindingArity(items.len()),
+                        binding.span.clone(),
+                    ),
+                ),
+            },
+            _ => (
+                Symbol::UNDERSCORE,
+                self.invalid(binding, FormErrorKind::LetInvalidBinding),
+            ),
+        };
+        LetBinding {
+            symbol,
+            value: self.bump.alloc(value),
         }
     }
 
@@ -495,60 +472,85 @@ impl<'bump, 'src> AstBuilder<'bump, '_, 'src> {
         }
     }
 
-    /// `(let ((name value)...) body...)`
-    fn let_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
-        let (bindings, body) = match operands {
-            [] => return self.error(FormErrorKind::LetMissingBindingListAndBody, span),
-            [_] => return self.error(FormErrorKind::LetMissingBody, span),
-            [bindings, body @ ..] => (bindings, body),
-        };
-        let SexpKind::List(bindings) = &bindings.kind else {
-            return self.error(FormErrorKind::LetInvalidBindingList, bindings.span.clone());
-        };
-        let bump = self.bump;
-        let bindings = BumpVec::from_iter_in(
-            bindings.iter().map(|binding| self.let_binding(binding)),
-            bump,
-        )
-        .into_bump_slice();
-        let body = self.body(body, span.clone());
+    /// `(function arg...)`
+    fn call(&mut self, function: &Sexp<'src>, args: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let function = self.sexp_to_ast(function);
+        let args = self.sexps_to_asts(args);
         Ast {
-            kind: AstKind::Let {
-                bindings,
-                body: bump.alloc(body),
+            kind: AstKind::FunctionCall {
+                function: self.bump.alloc(function),
+                args,
             },
             span,
         }
     }
 
-    /// A single `(name value)` binding of a `let` form.
-    fn let_binding(&mut self, binding: &Sexp<'src>) -> LetBinding<'bump> {
-        let (symbol, value) = match &binding.kind {
-            SexpKind::List(items) => match items.as_slice() {
-                [name, value] => (
-                    self.binding_name(name, FormErrorKind::LetInvalidBindingName),
-                    self.sexp_to_ast(value),
-                ),
-                [] => (
-                    Symbol::UNDERSCORE,
-                    self.invalid(binding, FormErrorKind::LetInvalidBinding),
-                ),
-                _ => (
-                    Symbol::UNDERSCORE,
-                    self.error(
-                        FormErrorKind::InvalidBindingArity(items.len()),
-                        binding.span.clone(),
-                    ),
-                ),
-            },
-            _ => (
-                Symbol::UNDERSCORE,
-                self.invalid(binding, FormErrorKind::LetInvalidBinding),
+    /// `(if condition then-branch [else-branch])`
+    fn if_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let (condition, then_branch, else_branch) = match operands {
+            [] => return self.error(FormErrorKind::IfMissingConditionAndBranches, span),
+            [_] => return self.error(FormErrorKind::IfMissingBranches, span),
+            [condition, then_branch] => (
+                self.sexp_to_ast(condition),
+                self.sexp_to_ast(then_branch),
+                undefined(span.clone()),
             ),
+            [condition, then_branch, else_branch] => (
+                self.sexp_to_ast(condition),
+                self.sexp_to_ast(then_branch),
+                self.sexp_to_ast(else_branch),
+            ),
+            _ => {
+                return self.error(FormErrorKind::IfTooManyArguments(operands.len()), span);
+            }
         };
-        LetBinding {
-            symbol,
-            value: self.bump.alloc(value),
+        Ast {
+            kind: AstKind::If {
+                condition: self.bump.alloc(condition),
+                then_branch: self.bump.alloc(then_branch),
+                else_branch: self.bump.alloc(else_branch),
+            },
+            span,
+        }
+    }
+
+    /// `(when condition body...)`, an `if` without an else branch.
+    fn when(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let [condition, body @ ..] = operands else {
+            return self.error(FormErrorKind::WhenMissingConditionAndBody, span);
+        };
+        let condition = self.sexp_to_ast(condition);
+        let then_branch = self.body(body, span.clone());
+        Ast {
+            kind: AstKind::If {
+                condition: self.bump.alloc(condition),
+                then_branch: self.bump.alloc(then_branch),
+                else_branch: self.bump.alloc(undefined(span.clone())),
+            },
+            span,
+        }
+    }
+
+    /// `(begin expr...)`
+    fn begin(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        Ast {
+            kind: AstKind::Begin(self.sexps_to_asts(operands)),
+            span,
+        }
+    }
+
+    /// `(return [value])`
+    fn return_form(&mut self, operands: &[Sexp<'src>], span: Span) -> Ast<'bump> {
+        let value = match operands {
+            [] => undefined(span.clone()),
+            [value] => self.sexp_to_ast(value),
+            _ => {
+                return self.error(FormErrorKind::ReturnTooManyArguments(operands.len()), span);
+            }
+        };
+        Ast {
+            kind: AstKind::Return(self.bump.alloc(value)),
+            span,
         }
     }
 

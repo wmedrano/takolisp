@@ -68,6 +68,9 @@ impl<'a> CompilerContext<'a> {
         Ok(bytecode)
     }
 
+    /// Compile one expression to bytecode.
+    ///
+    /// The match arms are in [`AstKind`] order.
     fn compile_ast(
         &mut self,
         name: Option<Symbol>,
@@ -85,10 +88,6 @@ impl<'a> CompilerContext<'a> {
                 }
                 self.emit_lookup(*symbol, ast.span.clone(), return_expression)?;
             }
-            AstKind::Set { symbol, value } => {
-                self.compile_ast(None, value, false)?;
-                self.emit_set(*symbol, ast.span.clone(), return_expression)?;
-            }
             AstKind::Define { symbol, value } => {
                 self.compile_ast(Some(*symbol), value, false)?;
                 let module = self.heap.modules.get_mut(self.module).unwrap();
@@ -103,11 +102,15 @@ impl<'a> CompilerContext<'a> {
                     self.emit(Instruction::Return);
                 }
             }
-            AstKind::Lambda { args, body } => {
-                self.compile_lambda(name, args, body, return_expression)?
-            }
             AstKind::Let { bindings, body } => {
                 self.compile_let(bindings, body, return_expression)?
+            }
+            AstKind::Set { symbol, value } => {
+                self.compile_ast(None, value, false)?;
+                self.emit_set(*symbol, ast.span.clone(), return_expression)?;
+            }
+            AstKind::Lambda { args, body } => {
+                self.compile_lambda(name, args, body, return_expression)?
             }
             AstKind::FunctionCall { function, args } => {
                 self.compile_ast(None, function, false)?;
@@ -119,18 +122,18 @@ impl<'a> CompilerContext<'a> {
                     self.emit(Instruction::Return);
                 }
             }
-            AstKind::Begin(exprs) => {
-                self.compile_begin(exprs, return_expression)?;
-            }
-            AstKind::Return(value) => {
-                self.compile_ast(None, value, true)?;
-            }
             AstKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
                 self.compile_if(condition, then_branch, else_branch, return_expression)?;
+            }
+            AstKind::Begin(exprs) => {
+                self.compile_begin(exprs, return_expression)?;
+            }
+            AstKind::Return(value) => {
+                self.compile_ast(None, value, true)?;
             }
         }
         Ok(())

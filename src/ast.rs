@@ -32,8 +32,13 @@ pub struct Ast<'a> {
 }
 
 /// The type of `Ast` node.
+///
+/// Variants are grouped in this order: atoms, then binding and assignment, then abstraction and
+/// application, then control flow. Matching code, such as the compiler and the builder, follows
+/// the same order.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AstKind<'a> {
+    // Atoms, which have no sub-expressions.
     /// An expression that evaluates to a constant.
     Constant(Val),
     /// An expression that looks up a symbol, optionally qualified by a namespace.
@@ -43,30 +48,31 @@ pub enum AstKind<'a> {
         namespace: Option<Symbol>,
         symbol: Symbol,
     },
+
+    // Binding and assignment, which associate a symbol with a value.
     /// Evaluates `value` and defines it as a global `symbol`.
     Define { symbol: Symbol, value: &'a Ast<'a> },
+    /// Evaluates each binding in order and then the body.
+    Let {
+        bindings: &'a [LetBinding<'a>],
+        body: &'a Ast<'a>,
+    },
     /// Sets the value at `symbol` to `value`.
     Set { symbol: Symbol, value: &'a Ast<'a> },
+
+    // Abstraction and application.
     /// Creates a function with the specified arguments and body.
     Lambda {
         args: &'a [Symbol],
         body: &'a Ast<'a>,
     },
-    /// Evaluates sequential local bindings and then the body.
-    Let {
-        bindings: &'a [LetBinding<'a>],
-        body: &'a Ast<'a>,
-    },
-    /// An expression that calls `function` (also an expression) and `args`, which may also be
-    /// expressions.
+    /// Calls `function` with `args`.
     FunctionCall {
         function: &'a Ast<'a>,
         args: &'a [Ast<'a>],
     },
-    /// A sequence of expressions whose value is the value of the last expression.
-    Begin(&'a [Ast<'a>]),
-    /// Evaluates `value` and returns it from the current function.
-    Return(&'a Ast<'a>),
+
+    // Control flow.
     /// A conditional expression.
     If {
         /// The expression used to select a branch.
@@ -76,9 +82,13 @@ pub enum AstKind<'a> {
         /// The expression evaluated when the condition is falsy.
         else_branch: &'a Ast<'a>,
     },
+    /// A sequence of expressions whose value is the value of the last expression.
+    Begin(&'a [Ast<'a>]),
+    /// Evaluates `value` and returns it from the current function.
+    Return(&'a Ast<'a>),
 }
 
-/// A name and initializer in a [`AstKind::Let`] expression.
+/// One `symbol` and initializer pair of an [`AstKind::Let`] expression.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LetBinding<'a> {
     pub symbol: Symbol,
