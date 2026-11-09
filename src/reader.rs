@@ -83,9 +83,23 @@ impl<'a> Atom<'a> {
     }
 }
 
+impl ValReader {
+    fn push_val(&mut self, val: Val) {
+        match self.lists.last_mut() {
+            Some(list) => list.push(val),
+            None => self.atom = Some(val),
+        }
+    }
+}
+
 impl Reader for ValReader {
     type Value = Val;
     type Err = ValReadError;
+
+    fn reset(&mut self) {
+        self.atom = None;
+        self.lists.clear();
+    }
 
     fn start_list(&mut self, _: Token) -> Result<(), Self::Err> {
         self.lists.push(Vec::new());
@@ -98,10 +112,7 @@ impl Reader for ValReader {
             .pop()
             .map(Val::List)
             .ok_or_else(|| self.error(ReaderErrorKind::UnexpectedCloseParen, token))?;
-        match self.lists.last_mut() {
-            Some(list) => list.push(val),
-            None => self.atom = Some(val),
-        };
+        self.push_val(val);
         Ok(())
     }
 
@@ -112,10 +123,7 @@ impl Reader for ValReader {
             Atom::Float(f) => Val::Float(f),
             Atom::String(s) => Val::String(s),
         };
-        match self.lists.last_mut() {
-            Some(list) => list.push(val),
-            None => self.atom = Some(val),
-        }
+        self.push_val(val);
         Ok(())
     }
 
@@ -138,30 +146,39 @@ pub trait Reader: Sized {
     /// The error type to use when reading fails.
     type Err;
 
+    /// Reset the reader's internal state before reading a new expression.
+    fn reset(&mut self) {}
+
     /// Called when the start of a list is encountered. Exits on error.
     fn start_list(&mut self, _: Token) -> Result<(), Self::Err>;
 
-    /// Called when the end of alist is encountered. Exits on error.
+    /// Called when the end of a list is encountered. Exits on error.
     fn end_list(&mut self, _: Token) -> Result<(), Self::Err>;
 
     /// Called when an atom is encountered. Exits on error.
     fn visit_atom(&mut self, _: Atom, _: Token) -> Result<(), Self::Err>;
 
-    /// Produce the final output. Returned when a just a single atom is encountered or when the
+    /// Produce the final output. Returned when just a single atom is encountered or when the
     /// entire list has been parsed.
     fn finalize(&mut self) -> Option<Self::Value>;
 
     /// Convert a reader error kind and its associated token into the desired error type.
     fn error(&mut self, kind: ReaderErrorKind, token: Token) -> Self::Err;
 
-    //// Create an iterator that produces all values encountered for `source`.
+    /// Create an iterator that produces all values encountered for `source`.
     fn iter<'a>(self, source: &'a str) -> ReaderIter<'a, Self> {
-        ReaderIter(self, Tokenizer::new(source))
+        ReaderIter {
+            reader: self,
+            tokenizer: Tokenizer::new(source),
+        }
     }
 }
 
 /// An iterator over values.
-pub struct ReaderIter<'a, R>(R, Tokenizer<'a>);
+pub struct ReaderIter<'a, R> {
+    reader: R,
+    tokenizer: Tokenizer<'a>,
+}
 
 impl<'a, R: Reader> Iterator for ReaderIter<'a, R> {
     type Item = Result<R::Value, R::Err>;
@@ -172,16 +189,14 @@ impl<'a, R: Reader> Iterator for ReaderIter<'a, R> {
 }
 
 impl<'a, R: Reader> ReaderIter<'a, R> {
-    fn read_next(&mut self) -> Result<Option<R::Value>, R::Err>
-    where
-        R: Reader,
-    {
+    fn read_next(&mut self) -> Result<Option<R::Value>, R::Err> {
+        self.reader.reset();
         let mut open_paren_spans: Vec<Span> = Vec::new();
         loop {
-            let Some(token) = self.1.next() else {
+            let Some(token) = self.tokenizer.next() else {
                 match open_paren_spans.pop() {
                     Some(span) => {
-                        return Err(self.0.error(
+                        return Err(self.reader.error(
                             ReaderErrorKind::UnclosedParen,
                             Token {
                                 kind: TokenKind::OpenParen,
@@ -194,37 +209,37 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
             };
             let maybe_atom = match token.kind {
                 TokenKind::OpenParen => {
-                    self.0.start_list(token)?;
+                    self.reader.start_list(token)?;
                     open_paren_spans.push(token.span);
                     None
                 }
                 TokenKind::CloseParen => {
                     if open_paren_spans.pop().is_none() {
-                        return Err(self.0.error(ReaderErrorKind::UnexpectedCloseParen, token));
+                        return Err(self.reader.error(ReaderErrorKind::UnexpectedCloseParen, token));
                     }
-                    self.0.end_list(token)?;
+                    self.reader.end_list(token)?;
                     if open_paren_spans.is_empty() {
-                        return Ok(self.0.finalize());
+                        return Ok(self.reader.finalize());
                     }
                     None
                 }
                 TokenKind::String => {
-                    let atom = Atom::parse_string(self.1.source(token.span))
-                        .map_err(|kind| self.0.error(kind, token))?;
+                    let atom = Atom::parse_string(self.tokenizer.source(token.span))
+                        .map_err(|kind| self.reader.error(kind, token))?;
                     Some(atom)
                 }
                 TokenKind::UnterminatedString => {
-                    return Err(self.0.error(ReaderErrorKind::UnterminatedString, token));
+                    return Err(self.reader.error(ReaderErrorKind::UnterminatedString, token));
                 }
                 TokenKind::Identifier => {
-                    let source = self.1.source(token.span);
+                    let source = self.tokenizer.source(token.span);
                     Some(Atom::parse_identifier(source))
                 }
             };
             if let Some(atom) = maybe_atom {
-                self.0.visit_atom(atom, token)?;
+                self.reader.visit_atom(atom, token)?;
                 if open_paren_spans.is_empty() {
-                    return Ok(self.0.finalize());
+                    return Ok(self.reader.finalize());
                 }
             }
         }
@@ -456,6 +471,21 @@ mod tests {
                 kind: ReaderErrorKind::UnexpectedCloseParen,
                 span: (1..2).into()
             }))
+        );
+    }
+
+    #[test]
+    fn reader_resets_state_after_error_in_list() {
+        let values: Vec<_> = ValReader::default().iter(r#"(a "bad\q" 42"#).collect();
+        assert_eq!(
+            values,
+            vec![
+                Err(ValReadError {
+                    kind: ReaderErrorKind::InvalidEscape,
+                    span: (3..10).into(),
+                }),
+                Ok(Val::Int(42)),
+            ]
         );
     }
 }

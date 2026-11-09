@@ -49,15 +49,21 @@ impl<'a> Iterator for Tokenizer<'a> {
         let start = self.position;
         let kind = self.eat_next()?;
         let end = self.position;
-        let span = (start != end).then(|| (start..end).into())?;
-        Some(Token { span, kind })
+        debug_assert!(start < end);
+        Some(Token {
+            span: (start..end).into(),
+            kind,
+        })
     }
 }
 
 impl<'a> Tokenizer<'a> {
+    fn rest(&self) -> &'a str {
+        &self.source[self.position..]
+    }
+
     fn eat_until(&mut self, mut pred: impl FnMut(char) -> bool) {
-        let source = &self.source[self.position..];
-        for ch in source.chars() {
+        for ch in self.rest().chars() {
             if pred(ch) {
                 return;
             }
@@ -70,9 +76,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn eat_next(&mut self) -> Option<TokenKind> {
-        let Some(leading_ch) = self.source[self.position..].chars().next() else {
-            return None;
-        };
+        let leading_ch = self.rest().chars().next()?;
         match leading_ch {
             '"' => Some(self.eat_string()),
             '(' => {
@@ -91,22 +95,18 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn eat_string(&mut self) -> TokenKind {
-        let mut chars = self.source[self.position..].chars();
+        let mut chars = self.rest().chars();
         // Leading quote
         self.position += chars.next().map(char::len_utf8).unwrap_or(0);
-        let mut kind = TokenKind::UnterminatedString;
         let mut is_escaped = false;
-        self.eat_until(|ch| {
-            if kind == TokenKind::String {
-                return true;
-            }
+        for ch in chars {
+            self.position += ch.len_utf8();
             if !is_escaped && ch == '"' {
-                kind = TokenKind::String;
+                return TokenKind::String;
             }
             is_escaped = !is_escaped && ch == '\\';
-            false
-        });
-        kind
+        }
+        TokenKind::UnterminatedString
     }
 }
 
