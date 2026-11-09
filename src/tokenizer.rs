@@ -2,12 +2,20 @@ use core::range::Range;
 
 pub type Span = Range<usize>;
 
+/// Refers to a subset of a source string.
+pub struct Token {
+    /// The location within the source.
+    pub span: Span,
+}
+
+/// Converts text into a stream of tokens.
 pub struct Tokenizer<'a> {
     position: usize,
     source: &'a str,
 }
 
 impl<'a> Tokenizer<'a> {
+    /// Create a new [`Tokenizer`] from a source string.
     pub fn new(source: &'a str) -> Self {
         Tokenizer {
             position: 0,
@@ -15,6 +23,26 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Get the source string for the corresponding [`Span`].
+    pub fn source(&self, span: Span) -> &str {
+        &self.source[span]
+    }
+}
+
+impl<'a> Iterator for Tokenizer<'a> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Token> {
+        self.eat_whitespace();
+        let start = self.position;
+        self.eat_next();
+        let end = self.position;
+        let span = (start != end).then(|| (start..end).into())?;
+        Some(Token { span })
+    }
+}
+
+impl<'a> Tokenizer<'a> {
     fn eat_until(&mut self, mut pred: impl FnMut(char) -> bool) {
         let source = &self.source[self.position..];
         for ch in source.chars() {
@@ -41,7 +69,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn eat_string(&mut self) {
-        let mut chars = (&self.source[self.position..]).chars();
+        let mut chars = self.source[self.position..].chars();
         // Leading quote
         self.position += chars.next().map(char::len_utf8).unwrap_or(0);
         let mut is_done = false;
@@ -57,25 +85,13 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-impl<'a> Iterator for Tokenizer<'a> {
-    type Item = Span;
-
-    fn next(&mut self) -> Option<Span> {
-        self.eat_whitespace();
-        let start = self.position;
-        self.eat_next();
-        let end = self.position;
-        (start != end).then(|| (start..end).into())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tokenize(source: &str) -> Vec<&str> {
         let tokenizer = Tokenizer::new(source);
-        tokenizer.map(|span| &source[span]).collect()
+        tokenizer.map(|token| &source[token.span]).collect()
     }
 
     #[test]
