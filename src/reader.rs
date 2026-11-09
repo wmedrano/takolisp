@@ -28,10 +28,29 @@ pub struct ValReader {
 /// A single element parsed from a token.
 pub enum Atom<'a> {
     Identifier(&'a str),
+    Int(i64),
+    Float(f64),
     String(String),
 }
 
 impl<'a> Atom<'a> {
+    /// Parse an identifier. Attempts to parse as an int or float and falls back to identifier for
+    /// all others.
+    pub fn parse_identifier(source: &'a str) -> Self {
+        let unsigned = source.strip_prefix(['+', '-']).unwrap_or(source);
+        let unsigned = unsigned.strip_prefix('.').unwrap_or(unsigned);
+        if !unsigned.starts_with(|c: char| c.is_ascii_digit()) {
+            return Self::Identifier(source);
+        }
+        if let Ok(i) = source.parse() {
+            Self::Int(i)
+        } else if let Ok(f) = source.parse() {
+            Self::Float(f)
+        } else {
+            Self::Identifier(source)
+        }
+    }
+
     /// Parse a quoted string, decoding `\n`, `\t`, `\r`, `\0`, `\b`, `\f`,
     /// `\\`, and `\"` escapes. Unknown escapes are rejected.
     pub fn parse_string(source: &str) -> Result<Self, ReaderErrorKind> {
@@ -89,6 +108,8 @@ impl Reader for ValReader {
     fn visit_atom(&mut self, atom: Atom, _: Token) -> Result<(), Self::Err> {
         let val = match atom {
             Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
+            Atom::Int(i) => Val::Int(i),
+            Atom::Float(f) => Val::Float(f),
             Atom::String(s) => Val::String(s),
         };
         match self.lists.last_mut() {
@@ -197,7 +218,7 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
                 }
                 TokenKind::Identifier => {
                     let source = self.1.source(token.span);
-                    Some(Atom::Identifier(source))
+                    Some(Atom::parse_identifier(source))
                 }
             };
             if let Some(atom) = maybe_atom {
@@ -229,6 +250,32 @@ mod tests {
     #[test]
     fn symbol_returns_symbol() {
         assert_eq!(read_one("hello"), Some(Ok(Val::Symbol("hello".into()))));
+    }
+
+    #[test]
+    fn numbers_return_int_or_float() {
+        for (source, expected) in [
+            ("42", Val::Int(42)),
+            ("-7", Val::Int(-7)),
+            ("+7", Val::Int(7)),
+            ("1.5", Val::Float(1.5)),
+            ("-0.25", Val::Float(-0.25)),
+            (".5", Val::Float(0.5)),
+            ("1e3", Val::Float(1000.0)),
+        ] {
+            assert_eq!(read_one(source), Some(Ok(expected)), "{source}");
+        }
+    }
+
+    #[test]
+    fn number_like_identifiers_return_symbols() {
+        for source in ["-", "+", "...", "inf", "nan", "-inf", "1abc", "1.2.3"] {
+            assert_eq!(
+                read_one(source),
+                Some(Ok(Val::Symbol(source.into()))),
+                "{source}"
+            );
+        }
     }
 
     #[test]
