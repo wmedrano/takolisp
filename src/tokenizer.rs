@@ -94,15 +94,15 @@ impl<'a> Tokenizer<'a> {
         let mut chars = self.source[self.position..].chars();
         // Leading quote
         self.position += chars.next().map(char::len_utf8).unwrap_or(0);
-        let mut is_done = false;
-        let mut is_escaped = false;
         let mut kind = TokenKind::UnterminatedString;
+        let mut is_escaped = false;
         self.eat_until(|ch| {
-            if is_done {
-                kind = TokenKind::String;
+            if kind == TokenKind::String {
                 return true;
             }
-            is_done = !is_escaped && ch == '"';
+            if !is_escaped && ch == '"' {
+                kind = TokenKind::String;
+            }
             is_escaped = !is_escaped && ch == '\\';
             false
         });
@@ -165,6 +165,10 @@ mod tests {
     #[test]
     fn string_is_single_token() {
         assert_eq!(
+            tokenize(r#""hello""#),
+            vec![(TokenKind::String, r#""hello""#)]
+        );
+        assert_eq!(
             tokenize(r#"start "string is here" end"#),
             vec![
                 (TokenKind::Identifier, "start"),
@@ -186,5 +190,30 @@ mod tests {
                 ),
             ]
         )
+    }
+
+    #[test]
+    fn escaped_quote_does_not_end_string() {
+        assert_eq!(
+            tokenize(r#""hello \"world\"" next"#),
+            vec![
+                (TokenKind::String, r#""hello \"world\"""#),
+                (TokenKind::Identifier, "next"),
+            ]
+        );
+    }
+
+    #[test]
+    fn closing_quote_after_even_backslashes_ends_string() {
+        for source in [r#""hello\\" next"#, r#""hello\\\\" next"#] {
+            let string_end = source.find(" next").unwrap();
+            assert_eq!(
+                tokenize(source),
+                vec![
+                    (TokenKind::String, &source[..string_end]),
+                    (TokenKind::Identifier, "next"),
+                ]
+            );
+        }
     }
 }
