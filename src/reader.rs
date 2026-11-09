@@ -1,11 +1,17 @@
 use crate::{
     Val,
-    tokenizer::{Span, Tokenizer},
+    tokenizer::{Span, Token, TokenKind, Tokenizer},
 };
 
 /// An error associated with [`ValReader`].
 #[derive(Debug, PartialEq, Eq)]
-pub enum ValReadError {
+pub struct ValReadError {
+    pub kind: ValReadErrorKind,
+    pub span: Span,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValReadErrorKind {
     UnexpectedCloseParen,
     UnclosedParen,
 }
@@ -26,17 +32,16 @@ impl Reader for ValReader {
     type Value = Val;
     type Err = ValReadError;
 
-    fn start_list(&mut self, _: Span) -> Result<(), Self::Err> {
+    fn start_list(&mut self, _: Token) -> Result<(), Self::Err> {
         self.lists.push(Vec::new());
         Ok(())
     }
 
-    fn end_list(&mut self, _: Span) -> Result<(), Self::Err> {
-        let val = self
-            .lists
-            .pop()
-            .map(Val::List)
-            .ok_or(ValReadError::UnexpectedCloseParen)?;
+    fn end_list(&mut self, token: Token) -> Result<(), Self::Err> {
+        let val = self.lists.pop().map(Val::List).ok_or(ValReadError {
+            kind: ValReadErrorKind::UnexpectedCloseParen,
+            span: token.span,
+        })?;
         match self.lists.last_mut() {
             Some(list) => list.push(val),
             None => self.atom = Some(val),
@@ -44,7 +49,7 @@ impl Reader for ValReader {
         Ok(())
     }
 
-    fn visit_atom(&mut self, atom: Atom, _: Span) -> Result<(), Self::Err> {
+    fn visit_atom(&mut self, atom: Atom, _: Token) -> Result<(), Self::Err> {
         let val = match atom {
             Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
         };
@@ -59,12 +64,18 @@ impl Reader for ValReader {
         self.atom.take()
     }
 
-    fn unexpected_end_list(&mut self, _: Span) -> Self::Err {
-        ValReadError::UnexpectedCloseParen
+    fn unexpected_end_list(&mut self, token: Token) -> Self::Err {
+        ValReadError {
+            kind: ValReadErrorKind::UnexpectedCloseParen,
+            span: token.span,
+        }
     }
 
-    fn unclosed_list(&mut self) -> Self::Err {
-        ValReadError::UnclosedParen
+    fn unclosed_list(&mut self, token: Token) -> Self::Err {
+        ValReadError {
+            kind: ValReadErrorKind::UnclosedParen,
+            span: token.span,
+        }
     }
 }
 
@@ -76,13 +87,13 @@ pub trait Reader: Sized {
     type Err;
 
     /// Called when the start of a list is encountered. Exits on error.
-    fn start_list(&mut self, _: Span) -> Result<(), Self::Err>;
+    fn start_list(&mut self, _: Token) -> Result<(), Self::Err>;
 
     /// Called when the end of alist is encountered. Exits on error.
-    fn end_list(&mut self, _: Span) -> Result<(), Self::Err>;
+    fn end_list(&mut self, _: Token) -> Result<(), Self::Err>;
 
     /// Called when an atom is encountered. Exits on error.
-    fn visit_atom(&mut self, _: Atom, _: Span) -> Result<(), Self::Err>;
+    fn visit_atom(&mut self, _: Atom, _: Token) -> Result<(), Self::Err>;
 
     /// Produce the final output. Returned when a just a single atom is encountered or when the
     /// entire list has been parsed.
@@ -90,10 +101,10 @@ pub trait Reader: Sized {
 
     /// Construct an unexpected end of list error. Occurs when a `)` token is encountered without a
     /// proper opening `(`.
-    fn unexpected_end_list(&mut self, _: Span) -> Self::Err;
+    fn unexpected_end_list(&mut self, _: Token) -> Self::Err;
 
     /// Construct an unclosed list error. Occurs when an opening `(` is present but the closing `)` is never reached.
-    fn unclosed_list(&mut self) -> Self::Err;
+    fn unclosed_list(&mut self, _: Token) -> Self::Err;
 
     //// Create an iterator that produces all values encountered for `source`.
     fn iter<'a>(self, source: &'a str) -> ReaderIter<'a, Self> {
@@ -117,35 +128,38 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
     where
         R: Reader,
     {
-        let mut nesting_depth: usize = 0;
+        let mut open_paren_spans: Vec<Span> = Vec::new();
         loop {
             let Some(token) = self.1.next() else {
-                if nesting_depth == 0 {
-                    return Ok(None);
-                } else {
-                    return Err(self.0.unclosed_list());
-                }
+                match open_paren_spans.pop() {
+                    Some(span) => {
+                        return Err(self.0.unclosed_list(Token {
+                            kind: TokenKind::OpenParen,
+                            span,
+                        }));
+                    }
+                    None => return Ok(None),
+                };
             };
-            let source = self.1.source(token.span);
-            match source {
-                "(" => {
-                    self.0.start_list(token.span)?;
-                    nesting_depth += 1;
+            match token.kind {
+                TokenKind::OpenParen => {
+                    self.0.start_list(token)?;
+                    open_paren_spans.push(token.span);
                 }
-                ")" => {
-                    nesting_depth = match nesting_depth.checked_sub(1) {
-                        Some(x) => x,
-                        None => return Err(self.0.unexpected_end_list(token.span)),
-                    };
-                    self.0.end_list(token.span)?;
-                    if nesting_depth == 0 {
+                TokenKind::CloseParen => {
+                    if open_paren_spans.pop().is_none() {
+                        return Err(self.0.unexpected_end_list(token));
+                    }
+                    self.0.end_list(token)?;
+                    if open_paren_spans.is_empty() {
                         return Ok(self.0.finalize());
                     }
                 }
                 _ => {
+                    let source = self.1.source(token.span);
                     let atom = Atom::Identifier(source);
-                    self.0.visit_atom(atom, token.span)?;
-                    if nesting_depth == 0 {
+                    self.0.visit_atom(atom, token)?;
+                    if open_paren_spans.is_empty() {
                         return Ok(self.0.finalize());
                     }
                 }
@@ -189,11 +203,23 @@ mod tests {
 
     #[test]
     fn unclosed_paren_is_error() {
-        assert_eq!(read_one("(1 2 3"), Some(Err(ValReadError::UnclosedParen)));
+        assert_eq!(
+            read_one(" (1 2 3"),
+            Some(Err(ValReadError {
+                kind: ValReadErrorKind::UnclosedParen,
+                span: (1..2).into()
+            }))
+        );
     }
 
     #[test]
     fn closed_paren_is_error() {
-        assert_eq!(read_one(")"), Some(Err(ValReadError::UnexpectedCloseParen)));
+        assert_eq!(
+            read_one(" )"),
+            Some(Err(ValReadError {
+                kind: ValReadErrorKind::UnexpectedCloseParen,
+                span: (1..2).into()
+            }))
+        );
     }
 }

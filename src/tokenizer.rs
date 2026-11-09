@@ -3,9 +3,21 @@ use core::range::Range;
 pub type Span = Range<usize>;
 
 /// Refers to a subset of a source string.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Token {
     /// The location within the source.
     pub span: Span,
+    /// The kind of token.
+    pub kind: TokenKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    OpenParen,
+    CloseParen,
+    Identifier,
+    String,
+    UnterminatedString,
 }
 
 /// Converts text into a stream of tokens.
@@ -35,10 +47,10 @@ impl<'a> Iterator for Tokenizer<'a> {
     fn next(&mut self) -> Option<Token> {
         self.eat_whitespace();
         let start = self.position;
-        self.eat_next();
+        let kind = self.eat_next()?;
         let end = self.position;
         let span = (start != end).then(|| (start..end).into())?;
-        Some(Token { span })
+        Some(Token { span, kind })
     }
 }
 
@@ -57,31 +69,44 @@ impl<'a> Tokenizer<'a> {
         self.eat_until(|ch| !ch.is_whitespace());
     }
 
-    fn eat_next(&mut self) {
+    fn eat_next(&mut self) -> Option<TokenKind> {
         let Some(leading_ch) = self.source[self.position..].chars().next() else {
-            return;
+            return None;
         };
         match leading_ch {
-            '"' => self.eat_string(),
-            '(' | ')' => self.position += leading_ch.len_utf8(),
-            _ => self.eat_until(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '"')),
+            '"' => Some(self.eat_string()),
+            '(' => {
+                self.position += leading_ch.len_utf8();
+                Some(TokenKind::OpenParen)
+            }
+            ')' => {
+                self.position += leading_ch.len_utf8();
+                Some(TokenKind::CloseParen)
+            }
+            _ => {
+                self.eat_until(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '"'));
+                Some(TokenKind::Identifier)
+            }
         }
     }
 
-    fn eat_string(&mut self) {
+    fn eat_string(&mut self) -> TokenKind {
         let mut chars = self.source[self.position..].chars();
         // Leading quote
         self.position += chars.next().map(char::len_utf8).unwrap_or(0);
         let mut is_done = false;
         let mut is_escaped = false;
+        let mut kind = TokenKind::UnterminatedString;
         self.eat_until(|ch| {
             if is_done {
+                kind = TokenKind::String;
                 return true;
             }
             is_done = !is_escaped && ch == '"';
             is_escaped = !is_escaped && ch == '\\';
             false
         });
+        kind
     }
 }
 
@@ -89,26 +114,33 @@ impl<'a> Tokenizer<'a> {
 mod tests {
     use super::*;
 
-    fn tokenize(source: &str) -> Vec<&str> {
+    fn tokenize(source: &str) -> Vec<(TokenKind, &str)> {
         let tokenizer = Tokenizer::new(source);
-        tokenizer.map(|token| &source[token.span]).collect()
+        tokenizer
+            .map(|token| (token.kind, &source[token.span]))
+            .collect()
     }
 
     #[test]
     fn empty_tokenizer_returns_none() {
-        assert_eq!(tokenize(""), Vec::<&str>::new())
+        assert_eq!(tokenize(""), Vec::<(TokenKind, &str)>::new())
     }
 
     #[test]
     fn whitespace_returns_none() {
-        assert_eq!(tokenize(" \n\t\r "), Vec::<&str>::new())
+        assert_eq!(tokenize(" \n\t\r "), Vec::<(TokenKind, &str)>::new())
     }
 
     #[test]
     fn tokens_split_by_whitespace() {
         assert_eq!(
             tokenize("abc 123\nxyz\t42"),
-            vec!["abc", "123", "xyz", "42"]
+            vec![
+                (TokenKind::Identifier, "abc"),
+                (TokenKind::Identifier, "123"),
+                (TokenKind::Identifier, "xyz"),
+                (TokenKind::Identifier, "42")
+            ]
         )
     }
 
@@ -116,7 +148,17 @@ mod tests {
     fn parens_are_single_token() {
         assert_eq!(
             tokenize("(this() has) expressions()"),
-            vec!["(", "this", "(", ")", "has", ")", "expressions", "(", ")"],
+            vec![
+                (TokenKind::OpenParen, "("),
+                (TokenKind::Identifier, "this"),
+                (TokenKind::OpenParen, "("),
+                (TokenKind::CloseParen, ")"),
+                (TokenKind::Identifier, "has"),
+                (TokenKind::CloseParen, ")"),
+                (TokenKind::Identifier, "expressions"),
+                (TokenKind::OpenParen, "("),
+                (TokenKind::CloseParen, ")"),
+            ],
         )
     }
 
@@ -124,7 +166,11 @@ mod tests {
     fn string_is_single_token() {
         assert_eq!(
             tokenize(r#"start "string is here" end"#),
-            vec!["start", r#""string is here""#, "end"]
+            vec![
+                (TokenKind::Identifier, "start"),
+                (TokenKind::String, r#""string is here""#),
+                (TokenKind::Identifier, "end")
+            ]
         )
     }
 
@@ -132,7 +178,13 @@ mod tests {
     fn unterminated_string_takes_all() {
         assert_eq!(
             tokenize(r#"start "string is here with no end"#),
-            vec!["start", r#""string is here with no end"#]
+            vec![
+                (TokenKind::Identifier, "start"),
+                (
+                    TokenKind::UnterminatedString,
+                    r#""string is here with no end"#
+                ),
+            ]
         )
     }
 }
