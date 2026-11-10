@@ -81,6 +81,15 @@ impl<'a> Atom<'a> {
         }
         Ok(Self::String(value))
     }
+
+    pub fn to_val(self) -> Val {
+        match self {
+            Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
+            Atom::Int(i) => Val::Int(i),
+            Atom::Float(f) => Val::Float(f),
+            Atom::String(s) => Val::String(s),
+        }
+    }
 }
 
 impl ValReader {
@@ -117,12 +126,7 @@ impl Reader for ValReader {
     }
 
     fn visit_atom(&mut self, atom: Atom, _: Token) -> Result<(), Self::Err> {
-        let val = match atom {
-            Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
-            Atom::Int(i) => Val::Int(i),
-            Atom::Float(f) => Val::Float(f),
-            Atom::String(s) => Val::String(s),
-        };
+        let val = atom.to_val();
         self.push_val(val);
         Ok(())
     }
@@ -215,7 +219,9 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
                 }
                 TokenKind::CloseParen => {
                     if open_paren_spans.pop().is_none() {
-                        return Err(self.reader.error(ReaderErrorKind::UnexpectedCloseParen, token));
+                        return Err(self
+                            .reader
+                            .error(ReaderErrorKind::UnexpectedCloseParen, token));
                     }
                     self.reader.end_list(token)?;
                     if open_paren_spans.is_empty() {
@@ -229,7 +235,9 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
                     Some(atom)
                 }
                 TokenKind::UnterminatedString => {
-                    return Err(self.reader.error(ReaderErrorKind::UnterminatedString, token));
+                    return Err(self
+                        .reader
+                        .error(ReaderErrorKind::UnterminatedString, token));
                 }
                 TokenKind::Identifier => {
                     let source = self.tokenizer.source(token.span);
