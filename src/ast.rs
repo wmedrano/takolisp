@@ -1,7 +1,7 @@
 use crate::{
-    Val,
     reader::{Atom, Reader, ReaderErrorKind},
     tokenizer::{Span, Token},
+    val::Val,
 };
 
 /// An abstract syntax tree that can be converted into executable bytecode.

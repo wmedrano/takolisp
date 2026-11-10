@@ -1,6 +1,6 @@
 use crate::{
-    Val,
     tokenizer::{Span, Token, TokenKind, Tokenizer},
+    val::Val,
 };
 
 /// An error associated with [`ValReader`].
