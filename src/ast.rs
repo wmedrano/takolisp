@@ -19,6 +19,14 @@ pub enum AstKind {
     Eval { func: Box<Ast>, args: Vec<Ast> },
     Lookup(String),
     Begin(Vec<Ast>),
+    If(IfAst),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IfAst {
+    pub pred: Box<Ast>,
+    pub then_branch: Box<Ast>,
+    pub else_branch: Option<Box<Ast>>,
 }
 
 impl Default for AstKind {
@@ -56,6 +64,29 @@ impl AstKind {
             return Err(AstBuilderErrorKind::EmptyExpression);
         }
         let func = exprs.remove(0);
+        if let AstKind::Lookup(ident) = &func.kind {
+            match ident.as_str() {
+                "if" => {
+                    return match exprs.as_slice() {
+                        [pred, then_branch] => Ok(AstKind::If(IfAst {
+                            pred: pred.clone().into(),
+                            then_branch: then_branch.clone().into(),
+                            else_branch: None,
+                        })),
+                        [pred, then_branch, else_branch] => Ok(AstKind::If(IfAst {
+                            pred: pred.clone().into(),
+                            then_branch: then_branch.clone().into(),
+                            else_branch: Some(else_branch.clone().into()),
+                        })),
+                        _ => Err(AstBuilderErrorKind::InvalidArgCount {
+                            expected: "2 or 3",
+                            actual: exprs.len(),
+                        }),
+                    };
+                }
+                _ => {}
+            };
+        }
         let ast = AstKind::Eval {
             func: func.into(),
             args: exprs,
@@ -88,6 +119,10 @@ pub enum AstBuilderErrorKind {
     UnterminatedString,
     InvalidEscape,
     EmptyExpression,
+    InvalidArgCount {
+        expected: &'static str,
+        actual: usize,
+    },
 }
 
 impl Reader for AstBuilder {
@@ -250,5 +285,63 @@ mod tests {
                 span: (0..2).into()
             })
         );
+    }
+
+    #[test]
+    fn if_parsed_as_if_expr() {
+        assert_eq!(
+            Ast::parse("(if #true 1)"),
+            Ok(Ast {
+                kind: AstKind::If(IfAst {
+                    pred: Box::new(Ast {
+                        kind: AstKind::Const(Val::Bool(true)),
+                        span: (4..9).into()
+                    }),
+                    then_branch: Box::new(Ast {
+                        kind: AstKind::Const(Val::Int(1)),
+                        span: (10..11).into()
+                    }),
+                    else_branch: None,
+                }),
+                span: (0..12).into()
+            })
+        );
+        assert_eq!(
+            Ast::parse("(if #true 1 2)"),
+            Ok(Ast {
+                kind: AstKind::If(IfAst {
+                    pred: Box::new(Ast {
+                        kind: AstKind::Const(Val::Bool(true)),
+                        span: (4..9).into()
+                    }),
+                    then_branch: Box::new(Ast {
+                        kind: AstKind::Const(Val::Int(1)),
+                        span: (10..11).into()
+                    }),
+                    else_branch: Some(Box::new(Ast {
+                        kind: AstKind::Const(Val::Int(2)),
+                        span: (12..13).into()
+                    })),
+                }),
+                span: (0..14).into()
+            })
+        );
+    }
+
+    #[test]
+    fn if_wrong_arg_count_is_error() {
+        for (source, actual) in [("(if)", 0), ("(if #true)", 1), ("(if #true 1 2 3)", 4)] {
+            assert_eq!(
+                Ast::parse(source),
+                Err(AstBuilderError {
+                    kind: AstBuilderErrorKind::InvalidArgCount {
+                        expected: "2 or 3",
+                        actual,
+                    },
+                    span: (0..source.len()).into(),
+                }),
+                "{source}"
+            );
+        }
     }
 }

@@ -98,6 +98,13 @@ impl Vm {
                     let new_len = self.stack.len().saturating_sub(*n);
                     self.stack.truncate(new_len);
                 }
+                Instruction::Jump(n) => call_frame.instruction_idx += *n,
+                Instruction::JumpIfNot(n) => {
+                    let val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                    if val.is_falsey() {
+                        call_frame.instruction_idx += *n;
+                    }
+                }
                 Instruction::Return => {
                     let return_val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let returning_frame = call_frames.pop().ok_or(VmError::StackUnderflow)?;
@@ -148,8 +155,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plus() {
+    fn function_calls() {
         let mut vm = Vm::new();
         assert_eq!(vm.eval_str("(+ 1 2 (+ 3 4))"), Ok(Val::Int(10)));
+    }
+
+    #[test]
+    fn conditional_branches() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(if #true (if #false 1 2) 3)"), Ok(Val::Int(2)));
     }
 }

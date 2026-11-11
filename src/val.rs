@@ -14,6 +14,12 @@ pub enum Val {
     BytecodeFunction(BytecodeFunction),
 }
 
+impl Val {
+    pub fn is_falsey(&self) -> bool {
+        matches!(self, Val::Bool(false))
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum VmError {
     StackUnderflow,
@@ -59,5 +65,7 @@ pub enum Instruction {
     Lookup(String),
     Eval(usize),
     Pop(usize),
+    Jump(usize),
+    JumpIfNot(usize),
     Return,
 }
