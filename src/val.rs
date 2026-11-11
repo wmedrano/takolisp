@@ -4,6 +4,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Val {
     Nil,
+    Bool(bool),
     Int(i64),
     Float(f64),
     String(String),

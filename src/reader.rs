@@ -28,15 +28,20 @@ pub struct ValReader {
 /// A single element parsed from a token.
 pub enum Atom<'a> {
     Identifier(&'a str),
+    Bool(bool),
     Int(i64),
     Float(f64),
     String(String),
 }
 
 impl<'a> Atom<'a> {
-    /// Parse an identifier. Attempts to parse as an int or float and falls back to identifier for
-    /// all others.
+    /// Parse boolean and numeric literals, falling back to an identifier for all others.
     pub fn parse_identifier(source: &'a str) -> Self {
+        match source {
+            "#true" => return Self::Bool(true),
+            "#false" => return Self::Bool(false),
+            _ => {}
+        }
         let unsigned = source.strip_prefix(['+', '-']).unwrap_or(source);
         let unsigned = unsigned.strip_prefix('.').unwrap_or(unsigned);
         if !unsigned.starts_with(|c: char| c.is_ascii_digit()) {
@@ -85,6 +90,7 @@ impl<'a> Atom<'a> {
     pub fn to_val(self) -> Val {
         match self {
             Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
+            Atom::Bool(b) => Val::Bool(b),
             Atom::Int(i) => Val::Int(i),
             Atom::Float(f) => Val::Float(f),
             Atom::String(s) => Val::String(s),
@@ -273,6 +279,30 @@ mod tests {
     #[test]
     fn symbol_returns_symbol() {
         assert_eq!(read_one("hello"), Some(Ok(Val::Symbol("hello".into()))));
+    }
+
+    #[test]
+    fn boolean_literals_return_bools() {
+        assert_eq!(read_one("#true"), Some(Ok(Val::Bool(true))));
+        assert_eq!(read_one("#false"), Some(Ok(Val::Bool(false))));
+        assert_eq!(
+            read_one("(#true(#false))"),
+            Some(Ok(Val::List(vec![
+                Val::Bool(true),
+                Val::List(vec![Val::Bool(false)]),
+            ])))
+        );
+    }
+
+    #[test]
+    fn boolean_like_identifiers_return_symbols() {
+        for source in ["true", "false", "#trueish", "#falsehood", "#True", "#FALSE"] {
+            assert_eq!(
+                read_one(source),
+                Some(Ok(Val::Symbol(source.into()))),
+                "{source}"
+            );
+        }
     }
 
     #[test]
