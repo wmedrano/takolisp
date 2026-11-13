@@ -137,8 +137,8 @@ impl Reader for ValReader {
         Ok(())
     }
 
-    fn finalize(&mut self) -> Option<Self::Value> {
-        self.atom.take()
+    fn finalize(&mut self) -> Result<Option<Self::Value>, Self::Err> {
+        Ok(self.atom.take())
     }
 
     fn error(&mut self, kind: ReaderErrorKind, token: Token) -> Self::Err {
@@ -170,7 +170,7 @@ pub trait Reader: Sized {
 
     /// Produce the final output. Returned when just a single atom is encountered or when the
     /// entire list has been parsed.
-    fn finalize(&mut self) -> Option<Self::Value>;
+    fn finalize(&mut self) -> Result<Option<Self::Value>, Self::Err>;
 
     /// Convert a reader error kind and its associated token into the desired error type.
     fn error(&mut self, kind: ReaderErrorKind, token: Token) -> Self::Err;
@@ -231,7 +231,7 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
                     }
                     self.reader.end_list(token)?;
                     if open_paren_spans.is_empty() {
-                        return Ok(self.reader.finalize());
+                        return self.reader.finalize();
                     }
                     None
                 }
@@ -253,7 +253,7 @@ impl<'a, R: Reader> ReaderIter<'a, R> {
             if let Some(atom) = maybe_atom {
                 self.reader.visit_atom(atom, token)?;
                 if open_paren_spans.is_empty() {
-                    return Ok(self.reader.finalize());
+                    return self.reader.finalize();
                 }
             }
         }

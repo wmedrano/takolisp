@@ -58,52 +58,97 @@ impl Ast {
     }
 }
 
-impl AstKind {
-    fn from_expr(mut exprs: Vec<Ast>) -> Result<AstKind, AstBuilderErrorKind> {
-        if exprs.is_empty() {
-            return Err(AstBuilderErrorKind::EmptyExpression);
-        }
-        let func = exprs.remove(0);
-        if let AstKind::Lookup(ident) = &func.kind {
-            match ident.as_str() {
-                "if" => {
-                    return match exprs.as_slice() {
-                        [pred, then_branch] => Ok(AstKind::If(IfAst {
-                            pred: pred.clone().into(),
-                            then_branch: then_branch.clone().into(),
-                            else_branch: None,
-                        })),
-                        [pred, then_branch, else_branch] => Ok(AstKind::If(IfAst {
-                            pred: pred.clone().into(),
-                            then_branch: then_branch.clone().into(),
-                            else_branch: Some(else_branch.clone().into()),
-                        })),
-                        _ => Err(AstBuilderErrorKind::InvalidArgCount {
-                            expected: "2 or 3",
-                            actual: exprs.len(),
-                        }),
-                    };
-                }
-                _ => {}
-            };
-        }
-        let ast = AstKind::Eval {
-            func: func.into(),
-            args: exprs,
+impl TryFrom<&'_ SExpr> for Ast {
+    type Error = AstBuilderError;
+
+    fn try_from(expr: &SExpr) -> Result<Ast, AstBuilderError> {
+        let kind = match &expr.kind {
+            SExprKind::Ident(ident) => AstKind::Lookup(ident.clone()),
+            SExprKind::Const(val) => AstKind::Const(val.clone()),
+            SExprKind::List(items) => AstKind::from_list(items, expr.span)?,
         };
-        Ok(ast)
+        Ok(Ast {
+            span: expr.span,
+            kind,
+        })
     }
 }
 
-struct Expr {
+impl AstKind {
+    fn from_list(items: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+        match items {
+            [] => Err(AstBuilderError {
+                kind: AstBuilderErrorKind::EmptyExpression,
+                span,
+            }),
+            [first, rest @ ..] => {
+                if let SExprKind::Ident(ident) = &first.kind
+                    && ident == "if"
+                {
+                    return Self::parse_if(rest, span);
+                }
+                let func = Box::new(Ast::try_from(first)?);
+                let args = rest
+                    .iter()
+                    .map(Ast::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(AstKind::Eval { func, args })
+            }
+        }
+    }
+
+    fn parse_if(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+        match args {
+            [pred, then_branch] => Ok(AstKind::If(IfAst {
+                pred: Box::new(Ast::try_from(pred)?),
+                then_branch: Box::new(Ast::try_from(then_branch)?),
+                else_branch: None,
+            })),
+            [pred, then_branch, else_branch] => Ok(AstKind::If(IfAst {
+                pred: Box::new(Ast::try_from(pred)?),
+                then_branch: Box::new(Ast::try_from(then_branch)?),
+                else_branch: Some(Box::new(Ast::try_from(else_branch)?)),
+            })),
+            _ => Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "2 or 3",
+                    actual: args.len(),
+                },
+                span,
+            }),
+        }
+    }
+}
+
+struct SExpr {
+    span: Span,
+    kind: SExprKind,
+}
+
+enum SExprKind {
+    Ident(String),
+    Const(Val),
+    List(Vec<SExpr>),
+}
+
+struct OpenList {
     start: usize,
-    list: Vec<Ast>,
+    items: Vec<SExpr>,
 }
 
 #[derive(Default)]
 pub struct AstBuilder {
-    ast: Option<Ast>,
-    exprs: Vec<Expr>,
+    expr: Option<SExpr>,
+    open_lists: Vec<OpenList>,
+}
+
+impl AstBuilder {
+    fn push_expr(&mut self, expr: SExpr) {
+        match self.open_lists.last_mut() {
+            Some(list) => list.items.push(expr),
+            None => self.expr = Some(expr),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,56 +176,44 @@ impl Reader for AstBuilder {
     type Err = AstBuilderError;
 
     fn reset(&mut self) {
-        self.exprs.clear();
-        self.ast.take();
+        self.open_lists.clear();
+        self.expr.take();
     }
 
     fn start_list(&mut self, token: Token) -> Result<(), AstBuilderError> {
-        self.exprs.push(Expr {
+        self.open_lists.push(OpenList {
             start: token.span.start,
-            list: Vec::new(),
+            items: Vec::new(),
         });
         Ok(())
     }
 
     fn end_list(&mut self, token: Token) -> Result<(), AstBuilderError> {
-        let mut expr = self.exprs.pop().ok_or(AstBuilderError {
+        let open = self.open_lists.pop().ok_or(AstBuilderError {
             kind: AstBuilderErrorKind::UnexpectedCloseParen,
             span: token.span,
         })?;
-        let ast = Ast {
-            kind: AstKind::from_expr(std::mem::take(&mut expr.list)).map_err(|kind| {
-                AstBuilderError {
-                    kind,
-                    span: (expr.start..token.span.end).into(),
-                }
-            })?,
-            span: (expr.start..token.span.end).into(),
-        };
-        match self.exprs.last_mut() {
-            Some(expr) => expr.list.push(ast),
-            None => self.ast = Some(ast),
-        }
+        self.push_expr(SExpr {
+            span: (open.start..token.span.end).into(),
+            kind: SExprKind::List(open.items),
+        });
         Ok(())
     }
 
     fn visit_atom(&mut self, atom: Atom, token: Token) -> Result<(), AstBuilderError> {
-        let kind = if let Atom::Identifier(ident) = &atom {
-            AstKind::Lookup(ident.to_string())
-        } else {
-            AstKind::Const(atom.to_val())
+        let kind = match atom {
+            Atom::Identifier(ident) => SExprKind::Ident(ident.to_string()),
+            other => SExprKind::Const(other.to_val()),
         };
-        let span = token.span;
-        let ast = Ast { kind, span };
-        match self.exprs.last_mut() {
-            Some(expr) => expr.list.push(ast),
-            None => self.ast = Some(ast),
-        }
+        self.push_expr(SExpr {
+            kind,
+            span: token.span,
+        });
         Ok(())
     }
 
-    fn finalize(&mut self) -> Option<Ast> {
-        self.ast.take()
+    fn finalize(&mut self) -> Result<Option<Ast>, AstBuilderError> {
+        self.expr.as_ref().map(Ast::try_from).transpose()
     }
 
     fn error(&mut self, kind: ReaderErrorKind, token: Token) -> AstBuilderError {
