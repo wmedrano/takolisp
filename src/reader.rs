@@ -10,6 +10,7 @@ pub struct ValReadError {
     pub span: Span,
 }
 
+#[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReaderErrorKind {
     UnexpectedCloseParen,

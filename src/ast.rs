@@ -20,6 +20,7 @@ pub enum AstKind {
     Lookup(String),
     Begin(Vec<Ast>),
     If(IfAst),
+    Lambda { body: Vec<Ast> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,10 +83,12 @@ impl AstKind {
                 span,
             }),
             [first, rest @ ..] => {
-                if let SExprKind::Ident(ident) = &first.kind
-                    && ident == "if"
-                {
-                    return Self::parse_if(rest, span);
+                if let SExprKind::Ident(ident) = &first.kind {
+                    match ident.as_str() {
+                        "if" => return Self::parse_if(rest, span),
+                        "lambda" => return Self::parse_lambda(rest, span),
+                        _ => {}
+                    }
                 }
                 let func = Box::new(Ast::try_from(first)?);
                 let args = rest
@@ -117,6 +120,35 @@ impl AstKind {
                 span,
             }),
         }
+    }
+
+    fn parse_lambda(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+        let [params, body @ ..] = args else {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "list params with body",
+                    actual: args.len(),
+                },
+                span,
+            });
+        };
+        let SExprKind::List(params) = &params.kind else {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span,
+            });
+        };
+        if !params.is_empty() {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::NotImplemented("lambda parameters"),
+                span,
+            });
+        }
+        let body = body
+            .iter()
+            .map(|b| -> Result<Ast, AstBuilderError> { Ast::try_from(b) })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AstKind::Lambda { body })
     }
 }
 
@@ -157,6 +189,7 @@ pub struct AstBuilderError {
     span: Span,
 }
 
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AstBuilderErrorKind {
     UnexpectedCloseParen,
@@ -168,6 +201,8 @@ pub enum AstBuilderErrorKind {
         expected: &'static str,
         actual: usize,
     },
+    InvalidLambdaParameters,
+    NotImplemented(&'static str),
 }
 
 impl Reader for AstBuilder {
@@ -376,5 +411,73 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn lambda_with_params_is_not_implemented() {
+        assert_eq!(
+            Ast::parse("(lambda (x) x)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::NotImplemented("lambda parameters"),
+                span: (0..14).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn lambda_returns_lambda_node() {
+        assert_eq!(
+            Ast::parse("(lambda ())"),
+            Ok(Ast {
+                kind: AstKind::Lambda { body: vec![] },
+                span: (0..11).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(lambda () 1 2)"),
+            Ok(Ast {
+                kind: AstKind::Lambda {
+                    body: vec![
+                        Ast {
+                            kind: AstKind::Const(Val::Int(1)),
+                            span: (11..12).into(),
+                        },
+                        Ast {
+                            kind: AstKind::Const(Val::Int(2)),
+                            span: (13..14).into(),
+                        },
+                    ],
+                },
+                span: (0..15).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn lambda_bad_params_is_error() {
+        assert_eq!(
+            Ast::parse("(lambda)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "list params with body",
+                    actual: 0,
+                },
+                span: (0..8).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(lambda 1 2)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (0..12).into(),
+            }),
+        );
+        assert_eq!(
+            Ast::parse("(lambda x x)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (0..12).into(),
+            }),
+        );
     }
 }

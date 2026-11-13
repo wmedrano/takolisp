@@ -155,14 +155,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn function_calls() {
+    fn function_is_called() {
         let mut vm = Vm::new();
         assert_eq!(vm.eval_str("(+ 1 2 (+ 3 4))"), Ok(Val::Int(10)));
     }
 
     #[test]
-    fn conditional_branches() {
+    fn if_returns_correct_branch() {
         let mut vm = Vm::new();
         assert_eq!(vm.eval_str("(if #true (if #false 1 2) 3)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn lambda_is_called() {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval_str("((lambda () (+ 1 2) (+ 1 2 3 4)))"),
+            Ok(Val::Int(10))
+        );
     }
 }

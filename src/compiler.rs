@@ -1,6 +1,6 @@
 use crate::{
     ast::{Ast, AstKind, IfAst},
-    val::{Instruction, Val},
+    val::{BytecodeFunction, Instruction, Val},
 };
 
 #[derive(Default)]
@@ -14,13 +14,16 @@ impl Compiler {
         self.instructions
     }
 
+    fn push(&mut self, instruction: Instruction) -> usize {
+        let idx = self.instructions.len();
+        self.instructions.push(instruction);
+        idx
+    }
+
     fn compile_one(&mut self, ast: &Ast, tail_call: bool) {
         match &ast.kind {
             AstKind::Const(val) => {
-                self.push(Instruction::PushConst(val.clone()));
-                if tail_call {
-                    self.push(Instruction::Return);
-                }
+                self.compile_const(val.clone(), tail_call);
             }
             AstKind::Eval { func, args } => {
                 self.compile_eval(func, args.as_slice());
@@ -36,6 +39,7 @@ impl Compiler {
             }
             AstKind::Begin(exprs) => self.compile_begin(exprs.as_slice(), tail_call),
             AstKind::If(if_ast) => self.compile_if(if_ast, tail_call),
+            AstKind::Lambda { body } => self.compile_lambda(body, tail_call),
         }
     }
 
@@ -45,6 +49,13 @@ impl Compiler {
             self.compile_one(arg, false);
         }
         self.push(Instruction::Eval(args.len()));
+    }
+
+    fn compile_const(&mut self, val: Val, tail_call: bool) {
+        self.push(Instruction::PushConst(val));
+        if tail_call {
+            self.push(Instruction::Return);
+        }
     }
 
     fn compile_begin(&mut self, exprs: &[Ast], tail_call: bool) {
@@ -98,9 +109,13 @@ impl Compiler {
         }
     }
 
-    fn push(&mut self, instruction: Instruction) -> usize {
-        let idx = self.instructions.len();
-        self.instructions.push(instruction);
-        idx
+    fn compile_lambda(&mut self, body: &[Ast], tail_call: bool) {
+        let mut sub_compiler = Compiler::default();
+        sub_compiler.compile_begin(body, true);
+        let bytecode = BytecodeFunction {
+            instructions: sub_compiler.instructions.into(),
+        };
+        let lambda_val = Val::BytecodeFunction(bytecode);
+        self.compile_const(lambda_val, tail_call);
     }
 }

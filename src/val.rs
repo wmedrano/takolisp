@@ -20,6 +20,7 @@ impl Val {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, PartialEq)]
 pub enum VmError {
     StackUnderflow,
