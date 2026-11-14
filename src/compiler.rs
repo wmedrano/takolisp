@@ -1,6 +1,9 @@
 use crate::{
     ast::{Ast, AstKind, IfAst},
-    val::{BytecodeFunction, Instruction, Val},
+    val::{
+        Val,
+        function::{BytecodeFunction, Instruction},
+    },
 };
 
 #[derive(Default)]

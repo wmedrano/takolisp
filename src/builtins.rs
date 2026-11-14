@@ -1,4 +1,4 @@
-use crate::val::{NativeFunction, Val, VmError};
+use crate::val::{Val, VmError, function::NativeFunction};
 
 pub const PLUS_FN: NativeFunction = NativeFunction::new(plus_fn);
 

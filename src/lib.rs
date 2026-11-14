@@ -4,7 +4,7 @@ use crate::{
     ast::Ast,
     builtins::PLUS_FN,
     compiler::Compiler,
-    val::{Instruction, Val, VmError},
+    val::{Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
 pub mod ast;

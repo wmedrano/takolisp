@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use smol_str::SmolStr;
+
+pub mod function;
+
+use function::{BytecodeFunction, NativeFunction};
 
 /// Contains a value from the Vm.
 #[derive(Clone, Debug, PartialEq)]
@@ -8,7 +12,7 @@ pub enum Val {
     Int(i64),
     Float(f64),
     String(String),
-    Symbol(String),
+    Symbol(Symbol),
     List(Vec<Val>),
     NativeFunction(&'static NativeFunction),
     BytecodeFunction(BytecodeFunction),
@@ -20,6 +24,15 @@ impl Val {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Symbol(pub(crate) SmolStr);
+
+impl From<&str> for Symbol {
+    fn from(s: &str) -> Symbol {
+        Symbol(s.into())
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, PartialEq)]
 pub enum VmError {
@@ -27,46 +40,4 @@ pub enum VmError {
     StackOverflow,
     NotCallable(Val),
     InvalidType { expected: &'static str, actual: Val },
-}
-
-pub struct NativeFunction {
-    func: fn(&[Val]) -> Result<Val, VmError>,
-}
-
-impl NativeFunction {
-    pub const fn new(func: fn(&[Val]) -> Result<Val, VmError>) -> NativeFunction {
-        NativeFunction { func }
-    }
-
-    pub fn eval(&self, args: &[Val]) -> Result<Val, VmError> {
-        (self.func)(args)
-    }
-}
-
-impl std::fmt::Debug for NativeFunction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeFunction").finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for NativeFunction {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BytecodeFunction {
-    pub(crate) instructions: Arc<[Instruction]>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Instruction {
-    PushConst(Val),
-    Lookup(String),
-    Eval(usize),
-    Pop(usize),
-    Jump(usize),
-    JumpIfNot(usize),
-    Return,
 }

@@ -90,7 +90,7 @@ impl<'a> Atom<'a> {
 
     pub fn to_val(self) -> Val {
         match self {
-            Atom::Identifier(ident) => Val::Symbol(ident.to_string()),
+            Atom::Identifier(ident) => Val::Symbol(ident.into()),
             Atom::Bool(b) => Val::Bool(b),
             Atom::Int(i) => Val::Int(i),
             Atom::Float(f) => Val::Float(f),
