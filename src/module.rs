@@ -25,6 +25,7 @@ impl ModuleId {
 pub struct Module {
     id: ModuleId,
     globals: HashMap<Symbol, Val>,
+    imports: HashMap<Symbol, ModuleId>,
 }
 
 impl Module {
@@ -32,6 +33,7 @@ impl Module {
         Self {
             id,
             globals: HashMap::new(),
+            imports: HashMap::new(),
         }
     }
 
@@ -53,6 +55,18 @@ impl Module {
 
     pub fn insert(&mut self, symbol: impl Into<Symbol>, val: Val) -> Option<Val> {
         self.globals.insert(symbol.into(), val)
+    }
+
+    pub fn imports(&self) -> &HashMap<Symbol, ModuleId> {
+        &self.imports
+    }
+
+    pub fn get_import(&self, symbol: &Symbol) -> Option<&ModuleId> {
+        self.imports.get(symbol)
+    }
+
+    pub fn import(&mut self, symbol: impl Into<Symbol>, module: ModuleId) -> Option<ModuleId> {
+        self.imports.insert(symbol.into(), module)
     }
 }
 
@@ -82,6 +96,28 @@ mod tests {
         assert_eq!(
             file_mod.id(),
             &ModuleId::File(PathBuf::from("examples/hello.tl"))
+        );
+    }
+
+    #[test]
+    fn module_stores_and_looks_up_imports() {
+        let mut module = Module::new(ModuleId::USER);
+        assert!(module.imports().is_empty());
+        assert_eq!(module.get_import(&Symbol::from("math")), None);
+
+        let math_mod = ModuleId::internal("math");
+        assert_eq!(module.import("math", math_mod.clone()), None);
+        assert_eq!(module.get_import(&Symbol::from("math")), Some(&math_mod));
+        assert_eq!(module.imports().get(&Symbol::from("math")), Some(&math_mod));
+
+        let file_math_mod = ModuleId::file("lib/math.tl");
+        assert_eq!(
+            module.import("math", file_math_mod.clone()),
+            Some(math_mod)
+        );
+        assert_eq!(
+            module.get_import(&Symbol::from("math")),
+            Some(&file_math_mod)
         );
     }
 }

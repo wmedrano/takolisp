@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     ast::Ast,
     builtins::PLUS_FN,
-    compiler::Compiler,
+    compiler::{Compiler, CompilerError},
     val::{Symbol, Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
@@ -22,6 +22,14 @@ mod tokenizer;
 pub mod val;
 
 pub use module::{Module, ModuleId};
+
+impl From<CompilerError> for VmError {
+    fn from(err: CompilerError) -> Self {
+        match err {
+            CompilerError::ModuleNotFound(id) => VmError::ModuleNotFound(id),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Vm {
@@ -93,8 +101,8 @@ impl Vm {
     pub fn eval_str_in(&mut self, module: ModuleId, source: &str) -> Result<Val, VmError> {
         self.module_or_init(&module);
         let ast = Ast::parse_in(module.clone(), source).unwrap();
-        let instructions = Compiler::for_module(module.clone())
-            .compile_to_instructions(&ast)
+        let instructions = Compiler::for_module(module.clone(), &mut self.modules)
+            .compile_to_instructions(&ast)?
             .into();
         self.stack.clear();
         let mut call_frames = Vec::with_capacity(64);

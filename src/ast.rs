@@ -40,6 +40,10 @@ pub enum AstKind {
         parameters: Vec<Symbol>,
         body: Vec<Ast>,
     },
+    Import {
+        module: ModuleId,
+        alias: Symbol,
+    },
 }
 
 impl Default for AstKind {
@@ -103,6 +107,7 @@ impl AstKind {
                         "define" => return Self::parse_define(rest, span, module),
                         "if" => return Self::parse_if(rest, span, module),
                         "lambda" => return Self::parse_lambda(rest, span, module),
+                        "import" => return Self::parse_import(rest, span),
                         _ => {}
                     }
                 }
@@ -248,6 +253,67 @@ impl AstKind {
             body,
         })
     }
+
+    fn parse_import(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+        let (path_expr, alias_expr) = match args {
+            [path] => (path, None),
+            [path, as_kw, alias] => {
+                if !matches!(&as_kw.kind, SExprKind::Ident(kw) if kw == "as") {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidImport,
+                        span: as_kw.span,
+                    });
+                }
+                (path, Some(alias))
+            }
+            _ => {
+                return Err(AstBuilderError {
+                    kind: AstBuilderErrorKind::InvalidArgCount {
+                        expected: "1 or 3",
+                        actual: args.len(),
+                    },
+                    span,
+                });
+            }
+        };
+
+        let SExprKind::Const(Val::String(path)) = &path_expr.kind else {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidImport,
+                span: path_expr.span,
+            });
+        };
+
+        let alias = match alias_expr {
+            Some(expr) => {
+                let SExprKind::Ident(ident) = &expr.kind else {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidImport,
+                        span: expr.span,
+                    });
+                };
+                Symbol::from(ident.as_str())
+            }
+            None => {
+                let Some(stem) = std::path::Path::new(path.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidImport,
+                        span: path_expr.span,
+                    });
+                };
+                Symbol::from(stem)
+            }
+        };
+
+        Ok(AstKind::Import {
+            module: ModuleId::file(path.as_str()),
+            alias,
+        })
+    }
 }
 
 struct SExpr {
@@ -292,6 +358,7 @@ pub enum AstBuilderErrorKind {
     },
     InvalidLambdaParameters,
     InvalidDefineTarget,
+    InvalidImport,
     NotImplemented(&'static str),
 }
 
@@ -816,6 +883,82 @@ mod tests {
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (15..18).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn import_parses_path_with_default_or_explicit_alias() {
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "path/to/file.tl")"#),
+            Ok(Ast {
+                kind: AstKind::Import {
+                    module: ModuleId::file("path/to/file.tl"),
+                    alias: "file".into(),
+                },
+                span: (0..26).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "path/to/file.tl" as f)"#),
+            Ok(Ast {
+                kind: AstKind::Import {
+                    module: ModuleId::file("path/to/file.tl"),
+                    alias: "f".into(),
+                },
+                span: (0..31).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn import_invalid_forms_return_error() {
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, "(import)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "1 or 3",
+                    actual: 0,
+                },
+                span: (0..8).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "path/to/file.tl" f)"#),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "1 or 3",
+                    actual: 2,
+                },
+                span: (0..28).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, "(import file)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidImport,
+                span: (8..12).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "path/to/file.tl" to f)"#),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidImport,
+                span: (26..28).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "path/to/file.tl" as 1)"#),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidImport,
+                span: (29..30).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, r#"(import "")"#),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidImport,
+                span: (8..10).into(),
             })
         );
     }
