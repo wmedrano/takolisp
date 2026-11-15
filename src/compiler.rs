@@ -1,6 +1,6 @@
 use crate::{
     ModuleId,
-    ast::{Ast, AstKind, IfAst},
+    ast::{Ast, AstKind},
     val::{
         Symbol, Val,
         function::{BytecodeFunction, Instruction},
@@ -52,8 +52,12 @@ impl Compiler {
                 self.compile_begin(exprs.as_slice(), tail_call);
                 return;
             }
-            AstKind::If(if_ast) => {
-                self.compile_if(if_ast, tail_call);
+            AstKind::If {
+                pred,
+                then_branch,
+                else_branch,
+            } => {
+                self.compile_if(pred, then_branch, else_branch.as_deref(), tail_call);
                 return;
             }
             AstKind::Const(val) => self.compile_const(val.clone()),
@@ -62,7 +66,7 @@ impl Compiler {
                 self.compile_one(value, false);
                 self.push(Instruction::Define(name.clone()));
             }
-            AstKind::Lookup(ident) => self.compile_lookup(ident),
+            AstKind::Lookup { module: _, name } => self.compile_lookup(name),
             AstKind::Lambda {
                 name,
                 parameters,
@@ -113,13 +117,19 @@ impl Compiler {
         }
     }
 
-    fn compile_if(&mut self, if_ast: &IfAst, tail_call: bool) {
+    fn compile_if(
+        &mut self,
+        pred: &Ast,
+        then_branch: &Ast,
+        else_branch: Option<&Ast>,
+        tail_call: bool,
+    ) {
         // Predicate
-        self.compile_one(&if_ast.pred, false);
+        self.compile_one(pred, false);
         let then_jump_idx = self.push(Instruction::JumpIfNot(0));
 
         // Then branch
-        self.compile_one(&if_ast.then_branch, tail_call);
+        self.compile_one(then_branch, tail_call);
         let end_jump_idx = self.instructions.len();
         if !tail_call {
             self.push(Instruction::Jump(0));
@@ -131,12 +141,7 @@ impl Compiler {
             kind: AstKind::Const(Val::Nil),
             span: (0..0).into(),
         };
-        let else_branch = &if_ast
-            .else_branch
-            .as_ref()
-            .map(Box::as_ref)
-            .unwrap_or(&nil_else);
-        self.compile_one(else_branch, tail_call);
+        self.compile_one(else_branch.unwrap_or(&nil_else), tail_call);
 
         // Jump offsets are relative to the instruction after the jump.
         let end = self.instructions.len();
@@ -160,7 +165,7 @@ mod tests {
 
     #[test]
     fn lookup_parameter_emits_lookup_local() {
-        let ast = Ast::parse("b").unwrap();
+        let ast = Ast::parse_in(ModuleId::USER, "b").unwrap();
         let instructions = Compiler::new(ModuleId::USER, vec!["a".into(), "b".into()])
             .compile_to_instructions(&ast);
         assert_eq!(
@@ -171,7 +176,7 @@ mod tests {
 
     #[test]
     fn lookup_non_parameter_emits_lookup_global() {
-        let ast = Ast::parse("+").unwrap();
+        let ast = Ast::parse_in(ModuleId::USER, "+").unwrap();
         let instructions = Compiler::new(ModuleId::USER, vec!["a".into(), "b".into()])
             .compile_to_instructions(&ast);
         assert_eq!(
@@ -189,7 +194,7 @@ mod tests {
 
     #[test]
     fn duplicate_parameter_lookup_binds_to_innermost_local() {
-        let expr = Ast::parse("a").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "a").unwrap();
         let instructions = Compiler::new(ModuleId::USER, vec!["a".into(), "b".into(), "a".into()])
             .compile_to_instructions(&expr);
         assert_eq!(
@@ -200,7 +205,7 @@ mod tests {
 
     #[test]
     fn constant_at_tail_emits_push_and_return() {
-        let expr = Ast::parse("42").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "42").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -218,7 +223,10 @@ mod tests {
     #[test]
     fn non_tail_begin_pops_intermediate_values() {
         let expr = ast(AstKind::Eval {
-            func: Box::new(ast(AstKind::Lookup("+".into()))),
+            func: Box::new(ast(AstKind::Lookup {
+                module: ModuleId::USER,
+                name: "+".into(),
+            })),
             args: vec![ast(AstKind::Begin(vec![
                 ast(AstKind::Const(Val::Int(1))),
                 ast(AstKind::Const(Val::Int(2))),
@@ -242,7 +250,7 @@ mod tests {
 
     #[test]
     fn if_without_else_defaults_else_branch_to_nil() {
-        let expr = Ast::parse("(if #true 1)").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(if #true 1)").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -259,7 +267,7 @@ mod tests {
 
     #[test]
     fn tail_if_emits_return_in_both_branches_without_trailing_jump() {
-        let expr = Ast::parse("(if #true 1 2)").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(if #true 1 2)").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -276,7 +284,7 @@ mod tests {
 
     #[test]
     fn non_tail_if_jumps_over_else_branch_after_then() {
-        let expr = Ast::parse("(+ (if #true 1 2))").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(+ (if #true 1 2))").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -295,7 +303,7 @@ mod tests {
 
     #[test]
     fn call_emits_func_then_args_then_eval() {
-        let expr = Ast::parse("(+ 1 2)").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(+ 1 2)").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -311,7 +319,7 @@ mod tests {
 
     #[test]
     fn lambda_compiles_body_with_its_own_parameters() {
-        let expr = Ast::parse("(lambda (x y) (+ x y))").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(lambda (x y) (+ x y))").unwrap();
         let instructions = Compiler::for_module(ModuleId::USER).compile_to_instructions(&expr);
         assert_eq!(
             instructions,
@@ -336,7 +344,7 @@ mod tests {
 
     #[test]
     fn lambda_inherits_module_from_enclosing_compiler() {
-        let expr = Ast::parse("(lambda (x) (lambda (y) (+ x y)))").unwrap();
+        let expr = Ast::parse_in(ModuleId::USER, "(lambda (x) (lambda (y) (+ x y)))").unwrap();
         let module = ModuleId::file("examples/math.tl");
         let instructions = Compiler::for_module(module.clone()).compile_to_instructions(&expr);
         assert_eq!(

@@ -1,4 +1,5 @@
 use crate::{
+    ModuleId,
     reader::{Atom, Reader, ReaderErrorKind},
     tokenizer::{Span, Token},
     val::{Symbol, Val},
@@ -24,21 +25,21 @@ pub enum AstKind {
         name: Symbol,
         value: Box<Ast>,
     },
-    Lookup(Symbol),
+    Lookup {
+        module: ModuleId,
+        name: Symbol,
+    },
     Begin(Vec<Ast>),
-    If(IfAst),
+    If {
+        pred: Box<Ast>,
+        then_branch: Box<Ast>,
+        else_branch: Option<Box<Ast>>,
+    },
     Lambda {
         name: Option<Symbol>,
         parameters: Vec<Symbol>,
         body: Vec<Ast>,
     },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct IfAst {
-    pub pred: Box<Ast>,
-    pub then_branch: Box<Ast>,
-    pub else_branch: Option<Box<Ast>>,
 }
 
 impl Default for AstKind {
@@ -48,9 +49,9 @@ impl Default for AstKind {
 }
 
 impl Ast {
-    pub fn parse(source: &str) -> Result<Ast, AstBuilderError> {
+    pub fn parse_in(module: ModuleId, source: &str) -> Result<Ast, AstBuilderError> {
         let mut asts = Vec::new();
-        for ast_res in AstBuilder::default().iter(source) {
+        for ast_res in AstBuilder::new(module).iter(source) {
             asts.push(ast_res?);
         }
         match asts.len() {
@@ -68,16 +69,15 @@ impl Ast {
             }
         }
     }
-}
 
-impl TryFrom<&'_ SExpr> for Ast {
-    type Error = AstBuilderError;
-
-    fn try_from(expr: &SExpr) -> Result<Ast, AstBuilderError> {
+    fn from_sexpr(expr: &SExpr, module: &ModuleId) -> Result<Ast, AstBuilderError> {
         let kind = match &expr.kind {
-            SExprKind::Ident(ident) => AstKind::Lookup(Symbol::from(ident.as_str())),
+            SExprKind::Ident(ident) => AstKind::Lookup {
+                module: module.clone(),
+                name: Symbol::from(ident.as_str()),
+            },
             SExprKind::Const(val) => AstKind::Const(val.clone()),
-            SExprKind::List(items) => AstKind::from_list(items, expr.span)?,
+            SExprKind::List(items) => AstKind::from_list(items, expr.span, module)?,
         };
         Ok(Ast {
             span: expr.span,
@@ -87,7 +87,11 @@ impl TryFrom<&'_ SExpr> for Ast {
 }
 
 impl AstKind {
-    fn from_list(items: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+    fn from_list(
+        items: &[SExpr],
+        span: Span,
+        module: &ModuleId,
+    ) -> Result<AstKind, AstBuilderError> {
         match items {
             [] => Err(AstBuilderError {
                 kind: AstBuilderErrorKind::EmptyExpression,
@@ -96,23 +100,27 @@ impl AstKind {
             [first, rest @ ..] => {
                 if let SExprKind::Ident(ident) = &first.kind {
                     match ident.as_str() {
-                        "define" => return Self::parse_define(rest, span),
-                        "if" => return Self::parse_if(rest, span),
-                        "lambda" => return Self::parse_lambda(rest, span),
+                        "define" => return Self::parse_define(rest, span, module),
+                        "if" => return Self::parse_if(rest, span, module),
+                        "lambda" => return Self::parse_lambda(rest, span, module),
                         _ => {}
                     }
                 }
-                let func = Box::new(Ast::try_from(first)?);
+                let func = Box::new(Ast::from_sexpr(first, module)?);
                 let args = rest
                     .iter()
-                    .map(Ast::try_from)
+                    .map(|expr| Ast::from_sexpr(expr, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(AstKind::Eval { func, args })
             }
         }
     }
 
-    fn parse_define(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+    fn parse_define(
+        args: &[SExpr],
+        span: Span,
+        module: &ModuleId,
+    ) -> Result<AstKind, AstBuilderError> {
         let [target, rest @ ..] = args else {
             return Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidArgCount {
@@ -135,7 +143,7 @@ impl AstKind {
                 };
                 Ok(AstKind::Define {
                     name: Symbol::from(ident.as_str()),
-                    value: Box::new(Ast::try_from(value)?),
+                    value: Box::new(Ast::from_sexpr(value, module)?),
                 })
             }
             SExprKind::List(sig) => {
@@ -158,7 +166,7 @@ impl AstKind {
                     name: name.clone(),
                     value: Box::new(Ast {
                         span: lambda_span,
-                        kind: Self::build_lambda(Some(name), params, rest)?,
+                        kind: Self::build_lambda(Some(name), params, rest, module)?,
                     }),
                 })
             }
@@ -169,18 +177,18 @@ impl AstKind {
         }
     }
 
-    fn parse_if(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+    fn parse_if(args: &[SExpr], span: Span, module: &ModuleId) -> Result<AstKind, AstBuilderError> {
         match args {
-            [pred, then_branch] => Ok(AstKind::If(IfAst {
-                pred: Box::new(Ast::try_from(pred)?),
-                then_branch: Box::new(Ast::try_from(then_branch)?),
+            [pred, then_branch] => Ok(AstKind::If {
+                pred: Box::new(Ast::from_sexpr(pred, module)?),
+                then_branch: Box::new(Ast::from_sexpr(then_branch, module)?),
                 else_branch: None,
-            })),
-            [pred, then_branch, else_branch] => Ok(AstKind::If(IfAst {
-                pred: Box::new(Ast::try_from(pred)?),
-                then_branch: Box::new(Ast::try_from(then_branch)?),
-                else_branch: Some(Box::new(Ast::try_from(else_branch)?)),
-            })),
+            }),
+            [pred, then_branch, else_branch] => Ok(AstKind::If {
+                pred: Box::new(Ast::from_sexpr(pred, module)?),
+                then_branch: Box::new(Ast::from_sexpr(then_branch, module)?),
+                else_branch: Some(Box::new(Ast::from_sexpr(else_branch, module)?)),
+            }),
             _ => Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidArgCount {
                     expected: "2 or 3",
@@ -191,7 +199,11 @@ impl AstKind {
         }
     }
 
-    fn parse_lambda(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+    fn parse_lambda(
+        args: &[SExpr],
+        span: Span,
+        module: &ModuleId,
+    ) -> Result<AstKind, AstBuilderError> {
         let [params, body @ ..] = args else {
             return Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidArgCount {
@@ -207,13 +219,14 @@ impl AstKind {
                 span,
             });
         };
-        Self::build_lambda(None, params, body)
+        Self::build_lambda(None, params, body, module)
     }
 
     fn build_lambda(
         name: Option<Symbol>,
         params: &[SExpr],
         body: &[SExpr],
+        module: &ModuleId,
     ) -> Result<AstKind, AstBuilderError> {
         let mut parameters = Vec::with_capacity(params.len());
         for param in params {
@@ -227,7 +240,7 @@ impl AstKind {
         }
         let body = body
             .iter()
-            .map(Ast::try_from)
+            .map(|expr| Ast::from_sexpr(expr, module))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AstKind::Lambda {
             name,
@@ -253,19 +266,10 @@ struct OpenList {
     items: Vec<SExpr>,
 }
 
-#[derive(Default)]
 pub struct AstBuilder {
+    module: ModuleId,
     expr: Option<SExpr>,
     open_lists: Vec<OpenList>,
-}
-
-impl AstBuilder {
-    fn push_expr(&mut self, expr: SExpr) {
-        match self.open_lists.last_mut() {
-            Some(list) => list.items.push(expr),
-            None => self.expr = Some(expr),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,6 +293,29 @@ pub enum AstBuilderErrorKind {
     InvalidLambdaParameters,
     InvalidDefineTarget,
     NotImplemented(&'static str),
+}
+
+impl Default for AstBuilder {
+    fn default() -> Self {
+        Self::new(ModuleId::USER)
+    }
+}
+
+impl AstBuilder {
+    pub fn new(module: ModuleId) -> Self {
+        Self {
+            module,
+            expr: None,
+            open_lists: Vec::new(),
+        }
+    }
+
+    fn push_expr(&mut self, expr: SExpr) {
+        match self.open_lists.last_mut() {
+            Some(list) => list.items.push(expr),
+            None => self.expr = Some(expr),
+        }
+    }
 }
 
 impl Reader for AstBuilder {
@@ -334,7 +361,10 @@ impl Reader for AstBuilder {
     }
 
     fn finalize(&mut self) -> Result<Option<Ast>, AstBuilderError> {
-        self.expr.as_ref().map(Ast::try_from).transpose()
+        self.expr
+            .as_ref()
+            .map(|expr| Ast::from_sexpr(expr, &self.module))
+            .transpose()
     }
 
     fn error(&mut self, kind: ReaderErrorKind, token: Token) -> AstBuilderError {
@@ -358,7 +388,7 @@ mod tests {
     #[test]
     fn empty_source_is_empty() {
         assert_eq!(
-            Ast::parse("\n"),
+            Ast::parse_in(ModuleId::USER, "\n"),
             Ok(Ast {
                 kind: AstKind::Const(Val::Nil),
                 span: (0..0).into(),
@@ -369,7 +399,7 @@ mod tests {
     #[test]
     fn literal_is_constant() {
         assert_eq!(
-            Ast::parse("1 2.0 \"hello\""),
+            Ast::parse_in(ModuleId::USER, "1 2.0 \"hello\""),
             Ok(Ast {
                 kind: AstKind::Begin(vec![
                     Ast {
@@ -393,10 +423,46 @@ mod tests {
     #[test]
     fn identifier_is_lookup() {
         assert_eq!(
-            Ast::parse("identifier"),
+            Ast::parse_in(ModuleId::USER, "identifier"),
             Ok(Ast {
-                kind: AstKind::Lookup("identifier".into()),
+                kind: AstKind::Lookup {
+                    module: ModuleId::USER,
+                    name: "identifier".into(),
+                },
                 span: (0..10).into()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_in_records_module_on_lookups() {
+        let module = ModuleId::internal("math");
+        assert_eq!(
+            Ast::parse_in(module.clone(), "(+ x 1)"),
+            Ok(Ast {
+                kind: AstKind::Eval {
+                    func: Box::new(Ast {
+                        kind: AstKind::Lookup {
+                            module: module.clone(),
+                            name: "+".into(),
+                        },
+                        span: (1..2).into(),
+                    }),
+                    args: vec![
+                        Ast {
+                            kind: AstKind::Lookup {
+                                module,
+                                name: "x".into(),
+                            },
+                            span: (3..4).into(),
+                        },
+                        Ast {
+                            kind: AstKind::Const(Val::Int(1)),
+                            span: (5..6).into(),
+                        },
+                    ],
+                },
+                span: (0..7).into(),
             })
         );
     }
@@ -404,21 +470,30 @@ mod tests {
     #[test]
     fn nested_expr_is_parsed() {
         assert_eq!(
-            Ast::parse("(a (b c))"),
+            Ast::parse_in(ModuleId::USER, "(a (b c))"),
             Ok(Ast {
                 kind: AstKind::Eval {
                     func: Box::new(Ast {
-                        kind: AstKind::Lookup("a".into()),
+                        kind: AstKind::Lookup {
+                            module: ModuleId::USER,
+                            name: "a".into(),
+                        },
                         span: (1..2).into()
                     }),
                     args: vec![Ast {
                         kind: AstKind::Eval {
                             func: Box::new(Ast {
-                                kind: AstKind::Lookup("b".into()),
+                                kind: AstKind::Lookup {
+                                    module: ModuleId::USER,
+                                    name: "b".into(),
+                                },
                                 span: (4..5).into()
                             }),
                             args: vec![Ast {
-                                kind: AstKind::Lookup("c".into()),
+                                kind: AstKind::Lookup {
+                                    module: ModuleId::USER,
+                                    name: "c".into(),
+                                },
                                 span: (6..7).into(),
                             }],
                         },
@@ -433,7 +508,7 @@ mod tests {
     #[test]
     fn empty_expr_is_error() {
         assert_eq!(
-            Ast::parse("()"),
+            Ast::parse_in(ModuleId::USER, "()"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::EmptyExpression,
                 span: (0..2).into()
@@ -444,9 +519,9 @@ mod tests {
     #[test]
     fn if_parsed_as_if_expr() {
         assert_eq!(
-            Ast::parse("(if #true 1)"),
+            Ast::parse_in(ModuleId::USER, "(if #true 1)"),
             Ok(Ast {
-                kind: AstKind::If(IfAst {
+                kind: AstKind::If {
                     pred: Box::new(Ast {
                         kind: AstKind::Const(Val::Bool(true)),
                         span: (4..9).into()
@@ -456,14 +531,14 @@ mod tests {
                         span: (10..11).into()
                     }),
                     else_branch: None,
-                }),
+                },
                 span: (0..12).into()
             })
         );
         assert_eq!(
-            Ast::parse("(if #true 1 2)"),
+            Ast::parse_in(ModuleId::USER, "(if #true 1 2)"),
             Ok(Ast {
-                kind: AstKind::If(IfAst {
+                kind: AstKind::If {
                     pred: Box::new(Ast {
                         kind: AstKind::Const(Val::Bool(true)),
                         span: (4..9).into()
@@ -476,7 +551,7 @@ mod tests {
                         kind: AstKind::Const(Val::Int(2)),
                         span: (12..13).into()
                     })),
-                }),
+                },
                 span: (0..14).into()
             })
         );
@@ -486,7 +561,7 @@ mod tests {
     fn if_wrong_arg_count_is_error() {
         for (source, actual) in [("(if)", 0), ("(if #true)", 1), ("(if #true 1 2 3)", 4)] {
             assert_eq!(
-                Ast::parse(source),
+                Ast::parse_in(ModuleId::USER, source),
                 Err(AstBuilderError {
                     kind: AstBuilderErrorKind::InvalidArgCount {
                         expected: "2 or 3",
@@ -502,14 +577,14 @@ mod tests {
     #[test]
     fn lambda_with_non_symbol_param_is_error() {
         assert_eq!(
-            Ast::parse("(lambda (1) 1)"),
+            Ast::parse_in(ModuleId::USER, "(lambda (1) 1)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (9..10).into(),
             })
         );
         assert_eq!(
-            Ast::parse("(lambda (x (y)) x)"),
+            Ast::parse_in(ModuleId::USER, "(lambda (x (y)) x)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (11..14).into(),
@@ -520,7 +595,7 @@ mod tests {
     #[test]
     fn lambda_returns_lambda_node() {
         assert_eq!(
-            Ast::parse("(lambda ())"),
+            Ast::parse_in(ModuleId::USER, "(lambda ())"),
             Ok(Ast {
                 kind: AstKind::Lambda {
                     name: None,
@@ -531,7 +606,7 @@ mod tests {
             })
         );
         assert_eq!(
-            Ast::parse("(lambda () 1 2)"),
+            Ast::parse_in(ModuleId::USER, "(lambda () 1 2)"),
             Ok(Ast {
                 kind: AstKind::Lambda {
                     name: None,
@@ -555,7 +630,7 @@ mod tests {
     #[test]
     fn lambda_bad_params_is_error() {
         assert_eq!(
-            Ast::parse("(lambda)"),
+            Ast::parse_in(ModuleId::USER, "(lambda)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidArgCount {
                     expected: "list params with body",
@@ -565,14 +640,14 @@ mod tests {
             })
         );
         assert_eq!(
-            Ast::parse("(lambda 1 2)"),
+            Ast::parse_in(ModuleId::USER, "(lambda 1 2)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (0..12).into(),
             }),
         );
         assert_eq!(
-            Ast::parse("(lambda x x)"),
+            Ast::parse_in(ModuleId::USER, "(lambda x x)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (0..12).into(),
@@ -583,7 +658,7 @@ mod tests {
     #[test]
     fn define_parsed_as_define_node() {
         assert_eq!(
-            Ast::parse("(define x 1)"),
+            Ast::parse_in(ModuleId::USER, "(define x 1)"),
             Ok(Ast {
                 kind: AstKind::Define {
                     name: "x".into(),
@@ -601,7 +676,7 @@ mod tests {
     fn define_wrong_arg_count_is_error() {
         for (source, actual) in [("(define)", 0), ("(define x)", 1), ("(define x 1 2)", 3)] {
             assert_eq!(
-                Ast::parse(source),
+                Ast::parse_in(ModuleId::USER, source),
                 Err(AstBuilderError {
                     kind: AstBuilderErrorKind::InvalidArgCount {
                         expected: "2",
@@ -617,21 +692,21 @@ mod tests {
     #[test]
     fn define_non_symbol_target_is_error() {
         assert_eq!(
-            Ast::parse("(define 1 2)"),
+            Ast::parse_in(ModuleId::USER, "(define 1 2)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidDefineTarget,
                 span: (8..9).into(),
             })
         );
         assert_eq!(
-            Ast::parse("(define () 1)"),
+            Ast::parse_in(ModuleId::USER, "(define () 1)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidDefineTarget,
                 span: (8..10).into(),
             })
         );
         assert_eq!(
-            Ast::parse("(define (1 x) x)"),
+            Ast::parse_in(ModuleId::USER, "(define (1 x) x)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidDefineTarget,
                 span: (9..10).into(),
@@ -642,7 +717,7 @@ mod tests {
     #[test]
     fn define_lambda_parsed_as_define_with_lambda() {
         assert_eq!(
-            Ast::parse("(define (foo bar) (+ bar 1))"),
+            Ast::parse_in(ModuleId::USER, "(define (foo bar) (+ bar 1))"),
             Ok(Ast {
                 kind: AstKind::Define {
                     name: "foo".into(),
@@ -653,12 +728,18 @@ mod tests {
                             body: vec![Ast {
                                 kind: AstKind::Eval {
                                     func: Box::new(Ast {
-                                        kind: AstKind::Lookup("+".into()),
+                                        kind: AstKind::Lookup {
+                                            module: ModuleId::USER,
+                                            name: "+".into(),
+                                        },
                                         span: (19..20).into(),
                                     }),
                                     args: vec![
                                         Ast {
-                                            kind: AstKind::Lookup("bar".into()),
+                                            kind: AstKind::Lookup {
+                                                module: ModuleId::USER,
+                                                name: "bar".into(),
+                                            },
                                             span: (21..24).into(),
                                         },
                                         Ast {
@@ -677,7 +758,7 @@ mod tests {
             })
         );
         assert_eq!(
-            Ast::parse("(define (foo) 1 2)"),
+            Ast::parse_in(ModuleId::USER, "(define (foo) 1 2)"),
             Ok(Ast {
                 kind: AstKind::Define {
                     name: "foo".into(),
@@ -703,7 +784,7 @@ mod tests {
             })
         );
         assert_eq!(
-            Ast::parse("(define (foo))"),
+            Ast::parse_in(ModuleId::USER, "(define (foo))"),
             Ok(Ast {
                 kind: AstKind::Define {
                     name: "foo".into(),
@@ -724,14 +805,14 @@ mod tests {
     #[test]
     fn define_lambda_with_non_symbol_param_is_error() {
         assert_eq!(
-            Ast::parse("(define (foo 1) 1)"),
+            Ast::parse_in(ModuleId::USER, "(define (foo 1) 1)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (13..14).into(),
             })
         );
         assert_eq!(
-            Ast::parse("(define (foo x (y)) x)"),
+            Ast::parse_in(ModuleId::USER, "(define (foo x (y)) x)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (15..18).into(),

@@ -92,7 +92,7 @@ impl Vm {
 
     pub fn eval_str_in(&mut self, module: ModuleId, source: &str) -> Result<Val, VmError> {
         self.module_or_init(&module);
-        let ast = Ast::parse(source).unwrap();
+        let ast = Ast::parse_in(module.clone(), source).unwrap();
         let instructions = Compiler::for_module(module.clone())
             .compile_to_instructions(&ast)
             .into();
