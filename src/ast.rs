@@ -107,7 +107,7 @@ impl AstKind {
                         "define" => return Self::parse_define(rest, span, module),
                         "if" => return Self::parse_if(rest, span, module),
                         "lambda" => return Self::parse_lambda(rest, span, module),
-                        "import" => return Self::parse_import(rest, span),
+                        "import" => return Self::parse_import(rest, span, module),
                         _ => {}
                     }
                 }
@@ -254,7 +254,11 @@ impl AstKind {
         })
     }
 
-    fn parse_import(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+    fn parse_import(
+        args: &[SExpr],
+        span: Span,
+        module: &ModuleId,
+    ) -> Result<AstKind, AstBuilderError> {
         let (path_expr, alias_expr) = match args {
             [path] => (path, None),
             [path, as_kw, alias] => {
@@ -309,8 +313,19 @@ impl AstKind {
             }
         };
 
+        let import_path = std::path::Path::new(path.as_str());
+        let resolved_module = match module {
+            ModuleId::File(current_file) if import_path.is_relative() => {
+                match current_file.parent() {
+                    Some(parent) => ModuleId::file(parent.join(import_path)),
+                    None => ModuleId::file(import_path),
+                }
+            }
+            _ => ModuleId::file(import_path),
+        };
+
         Ok(AstKind::Import {
-            module: ModuleId::file(path.as_str()),
+            module: resolved_module,
             alias,
         })
     }
@@ -907,6 +922,36 @@ mod tests {
                     alias: "f".into(),
                 },
                 span: (0..31).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn import_resolves_relative_and_normalized_paths() {
+        assert_eq!(
+            Ast::parse_in(
+                ModuleId::file("dir/sub/main.tl"),
+                r#"(import "../shared/./math.tl")"#,
+            ),
+            Ok(Ast {
+                kind: AstKind::Import {
+                    module: ModuleId::file("dir/shared/math.tl"),
+                    alias: "math".into(),
+                },
+                span: (0..30).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(
+                ModuleId::file("dir/sub/main.tl"),
+                r#"(import "/abs/../lib/math.tl" as m)"#,
+            ),
+            Ok(Ast {
+                kind: AstKind::Import {
+                    module: ModuleId::file("/lib/math.tl"),
+                    alias: "m".into(),
+                },
+                span: (0..35).into(),
             })
         );
     }

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
 
 use crate::val::{Symbol, Val};
 
@@ -17,7 +20,32 @@ impl ModuleId {
     }
 
     pub fn file(path: impl Into<PathBuf>) -> Self {
-        Self::File(path.into())
+        Self::File(normalize_path(&path.into()))
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.last() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                Some(Component::ParentDir) | None => normalized.push(component),
+                Some(Component::CurDir) => unreachable!(),
+            },
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component);
+            }
+        }
+    }
+    if normalized.is_empty() && !path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized.iter().collect()
     }
 }
 
@@ -97,6 +125,23 @@ mod tests {
             file_mod.id(),
             &ModuleId::File(PathBuf::from("examples/hello.tl"))
         );
+    }
+
+    #[test]
+    fn module_id_file_normalizes_paths() {
+        assert_eq!(
+            ModuleId::file("./examples/./sub/../hello.tl"),
+            ModuleId::file("examples/hello.tl")
+        );
+        assert_eq!(
+            ModuleId::file("../shared/math.tl"),
+            ModuleId::File(PathBuf::from("../shared/math.tl"))
+        );
+        assert_eq!(
+            ModuleId::file("/a/b/../c/../../d.tl"),
+            ModuleId::File(PathBuf::from("/d.tl"))
+        );
+        assert_eq!(ModuleId::file("a/.."), ModuleId::File(PathBuf::from(".")));
     }
 
     #[test]
