@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     ast::Ast,
@@ -19,9 +19,66 @@ mod tokenizer;
 /// Defines the value type that can hold an object of any type.
 pub mod val;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ModuleId {
+    Internal(Symbol),
+    File(PathBuf),
+}
+
+impl ModuleId {
+    pub fn internal(name: impl Into<Symbol>) -> Self {
+        Self::Internal(name.into())
+    }
+
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File(path.into())
+    }
+}
+
+impl Default for ModuleId {
+    fn default() -> Self {
+        Self::Internal("user".into())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Module {
+    id: ModuleId,
+    globals: HashMap<Symbol, Val>,
+}
+
+impl Module {
+    pub fn new(id: ModuleId) -> Self {
+        Self {
+            id,
+            globals: HashMap::new(),
+        }
+    }
+
+    pub fn internal(name: impl Into<Symbol>) -> Self {
+        Self::new(ModuleId::internal(name))
+    }
+
+    pub fn from_file(path: impl Into<PathBuf>) -> Self {
+        Self::new(ModuleId::file(path))
+    }
+
+    pub fn id(&self) -> &ModuleId {
+        &self.id
+    }
+
+    pub fn get(&self, symbol: &Symbol) -> Option<&Val> {
+        self.globals.get(symbol)
+    }
+
+    pub fn insert(&mut self, symbol: impl Into<Symbol>, val: Val) -> Option<Val> {
+        self.globals.insert(symbol.into(), val)
+    }
+}
+
 #[derive(Default)]
 pub struct Vm {
-    globals: HashMap<Symbol, Val>,
+    module: Module,
     stack: Vec<Val>,
 }
 
@@ -42,7 +99,7 @@ struct CallFrame {
 impl Vm {
     pub fn new() -> Vm {
         let mut vm = Vm::default();
-        vm.globals.insert("+".into(), Val::NativeFunction(&PLUS_FN));
+        vm.module.insert("+", Val::NativeFunction(&PLUS_FN));
         vm
     }
 
@@ -87,7 +144,7 @@ impl Vm {
             match instruction {
                 Instruction::PushConst(val) => self.stack.push(val.clone()),
                 Instruction::LookupGlobal(sym) => {
-                    let val = self.globals.get(sym).unwrap();
+                    let val = self.module.get(sym).unwrap();
                     self.stack.push(val.clone());
                 }
                 Instruction::LookupLocal(idx) => {
@@ -180,6 +237,31 @@ mod tests {
         assert_eq!(
             vm.eval_str("((lambda (a) (+ 1 2 a) (+ 1 2 3 4 a)) 10)"),
             Ok(Val::Int(20))
+        );
+    }
+
+    #[test]
+    fn module_stores_and_looks_up_globals() {
+        let mut module = Module::default();
+        assert_eq!(module.get(&Symbol::from("x")), None);
+        assert_eq!(module.insert("x", Val::Int(42)), None);
+        assert_eq!(module.get(&Symbol::from("x")), Some(&Val::Int(42)));
+        assert_eq!(module.insert("x", Val::Int(99)), Some(Val::Int(42)));
+        assert_eq!(module.get(&Symbol::from("x")), Some(&Val::Int(99)));
+    }
+
+    #[test]
+    fn module_tracks_internal_and_file_identity() {
+        let default_mod = Module::default();
+        assert_eq!(default_mod.id(), &ModuleId::internal("user"));
+
+        let core_mod = Module::internal("core");
+        assert_eq!(core_mod.id(), &ModuleId::Internal("core".into()));
+
+        let file_mod = Module::from_file("examples/hello.tl");
+        assert_eq!(
+            file_mod.id(),
+            &ModuleId::File(PathBuf::from("examples/hello.tl"))
         );
     }
 }
