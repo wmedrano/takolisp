@@ -55,6 +55,7 @@ pub enum Instruction {
     Pop(usize),
     Jump(usize),
     JumpIfNot(usize),
+    MarkLoaded(ModuleId),
     Return,
 }
 

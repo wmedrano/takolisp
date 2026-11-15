@@ -98,15 +98,37 @@ impl Vm {
     }
 
     pub fn eval_str(&mut self, source: &str) -> Result<Val, VmError> {
-        self.eval_str_in(ModuleId::internal("user"), source)
+        self.eval_str_in(ModuleId::USER, source)
     }
 
     pub fn eval_str_in(&mut self, module: ModuleId, source: &str) -> Result<Val, VmError> {
+        self.eval_source_in(module, source, false)
+    }
+
+    pub fn load_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<Val, VmError> {
+        let path = path.as_ref();
+        let source = std::fs::read_to_string(path).map_err(|err| VmError::IoError {
+            path: path.to_path_buf(),
+            kind: err.kind(),
+        })?;
+        self.eval_source_in(ModuleId::file(path), &source, true)
+    }
+
+    fn eval_source_in(
+        &mut self,
+        module: ModuleId,
+        source: &str,
+        as_module: bool,
+    ) -> Result<Val, VmError> {
         self.module_or_init(&module);
         let ast = Ast::parse_in(module.clone(), source)?;
-        let instructions = Compiler::for_module(module.clone(), &mut self.modules)
-            .compile_to_instructions(&ast)?
-            .into();
+        let compiler = Compiler::for_module(module.clone(), &mut self.modules);
+        let instructions = if as_module {
+            compiler.compile_module(&ast)?
+        } else {
+            compiler.compile_to_instructions(&ast)?
+        }
+        .into();
         self.stack.clear();
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
@@ -175,6 +197,12 @@ impl Vm {
                     if val.is_falsey() {
                         call_frame.instruction_idx += *n;
                     }
+                }
+                Instruction::MarkLoaded(module) => {
+                    self.modules
+                        .get_mut(module)
+                        .ok_or_else(|| VmError::ModuleNotFound(module.clone()))?
+                        .set_loaded(true);
                 }
                 Instruction::Return => {
                     let return_val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -537,6 +565,105 @@ mod tests {
             Err(VmError::SymbolNotFound {
                 module: ModuleId::USER,
                 name: Symbol::from("g"),
+            })
+        );
+    }
+
+    #[test]
+    fn mark_loaded_sets_module_loaded_state() {
+        use crate::val::function::BytecodeFunction;
+
+        let mut vm = Vm::new();
+        let file_mod = ModuleId::file("lib/math.tl");
+        vm.module_or_init(&file_mod);
+        assert!(!vm.module(&file_mod).unwrap().is_loaded());
+
+        let func = Val::BytecodeFunction(BytecodeFunction {
+            module: ModuleId::USER,
+            name: None,
+            parameters: vec![],
+            instructions: [
+                Instruction::MarkLoaded(file_mod.clone()),
+                Instruction::PushConst(Val::Nil),
+                Instruction::Return,
+            ]
+            .into(),
+        });
+
+        assert_eq!(vm.eval(func, []), Ok(Val::Nil));
+        assert!(vm.module(&file_mod).unwrap().is_loaded());
+    }
+
+    #[test]
+    fn mark_loaded_missing_module_returns_module_not_found_error() {
+        use crate::val::function::BytecodeFunction;
+
+        let mut vm = Vm::new();
+        let missing_mod = ModuleId::file("lib/missing.tl");
+        let func = Val::BytecodeFunction(BytecodeFunction {
+            module: ModuleId::USER,
+            name: None,
+            parameters: vec![],
+            instructions: [
+                Instruction::MarkLoaded(missing_mod.clone()),
+                Instruction::PushConst(Val::Nil),
+                Instruction::Return,
+            ]
+            .into(),
+        });
+
+        assert_eq!(vm.eval(func, []), Err(VmError::ModuleNotFound(missing_mod)));
+    }
+
+    #[test]
+    fn eval_str_in_file_module_does_not_mark_module_loaded() {
+        let mut vm = Vm::new();
+        let file_mod = ModuleId::file("lib/branch.tl");
+        vm.module_or_init(&file_mod);
+        assert!(!vm.module(&file_mod).unwrap().is_loaded());
+
+        assert_eq!(
+            vm.eval_str_in(file_mod.clone(), "(if #true 1 2)"),
+            Ok(Val::Int(1))
+        );
+        assert!(!vm.module(&file_mod).unwrap().is_loaded());
+    }
+
+    #[test]
+    fn load_file_evaluates_file_and_marks_module_loaded() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_load_file_test_{}.tl",
+            std::process::id()
+        ));
+        std::fs::write(&path, "(define answer 42) (if #true answer 0)").unwrap();
+
+        let mut vm = Vm::new();
+        let file_mod = ModuleId::file(&path);
+        let res = vm.load_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(res, Ok(Val::Int(42)));
+        let module = vm.module(&file_mod).unwrap();
+        assert!(module.is_loaded());
+        assert_eq!(module.get(&"answer".into()), Some(&Val::Int(42)));
+    }
+
+    #[test]
+    fn load_file_missing_file_returns_io_error() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_missing_file_test_{}.tl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.load_file(&path),
+            Err(VmError::IoError {
+                path,
+                kind: std::io::ErrorKind::NotFound,
             })
         );
     }

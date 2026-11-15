@@ -53,6 +53,10 @@ pub enum VmError {
         name: Symbol,
     },
     ParseError(crate::ast::AstBuilderError),
+    IoError {
+        path: std::path::PathBuf,
+        kind: std::io::ErrorKind,
+    },
 }
 
 #[cfg(test)]

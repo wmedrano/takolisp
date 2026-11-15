@@ -52,14 +52,17 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[derive(Clone, Debug)]
 pub struct Module {
     id: ModuleId,
+    loaded: bool,
     globals: HashMap<Symbol, Val>,
     imports: HashMap<Symbol, ModuleId>,
 }
 
 impl Module {
     pub fn new(id: ModuleId) -> Self {
+        let loaded = matches!(id, ModuleId::Internal(_));
         Self {
             id,
+            loaded,
             globals: HashMap::new(),
             imports: HashMap::new(),
         }
@@ -75,6 +78,14 @@ impl Module {
 
     pub fn id(&self) -> &ModuleId {
         &self.id
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    pub fn set_loaded(&mut self, loaded: bool) {
+        self.loaded = loaded;
     }
 
     pub fn get(&self, symbol: &Symbol) -> Option<&Val> {
@@ -164,5 +175,23 @@ mod tests {
             module.get_import(&Symbol::from("math")),
             Some(&file_math_mod)
         );
+    }
+
+    #[test]
+    fn module_tracks_loaded_state_with_expected_defaults() {
+        let user_mod = Module::new(ModuleId::USER);
+        assert!(user_mod.is_loaded());
+
+        let internal_mod = Module::internal("core");
+        assert!(internal_mod.is_loaded());
+
+        let mut file_mod = Module::from_file("examples/hello.tl");
+        assert!(!file_mod.is_loaded());
+
+        file_mod.set_loaded(true);
+        assert!(file_mod.is_loaded());
+
+        file_mod.set_loaded(false);
+        assert!(!file_mod.is_loaded());
     }
 }
