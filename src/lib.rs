@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    ast::Ast,
+    ast::{Ast, AstBuilderError},
     builtins::PLUS_FN,
     compiler::{Compiler, CompilerError},
     val::{Symbol, Val, VmError, function::Instruction},
@@ -22,6 +22,12 @@ mod tokenizer;
 pub mod val;
 
 pub use module::{Module, ModuleId};
+
+impl From<AstBuilderError> for VmError {
+    fn from(err: AstBuilderError) -> Self {
+        VmError::ParseError(err)
+    }
+}
 
 impl From<CompilerError> for VmError {
     fn from(err: CompilerError) -> Self {
@@ -108,7 +114,7 @@ impl Vm {
 
     pub fn eval_str_in(&mut self, module: ModuleId, source: &str) -> Result<Val, VmError> {
         self.module_or_init(&module);
-        let ast = Ast::parse_in(module.clone(), source).unwrap();
+        let ast = Ast::parse_in(module.clone(), source)?;
         let instructions = Compiler::for_module(module.clone(), &mut self.modules)
             .compile_to_instructions(&ast)?
             .into();
@@ -504,5 +510,12 @@ mod tests {
         });
 
         assert_eq!(vm.eval(func, []), Err(VmError::ModuleNotFound(missing_mod)));
+    }
+
+    #[test]
+    fn eval_str_returns_parse_error_instead_of_panicking() {
+        let mut vm = Vm::new();
+        assert!(matches!(vm.eval_str(".foo"), Err(VmError::ParseError(_))));
+        assert!(matches!(vm.eval_str("(import)"), Err(VmError::ParseError(_))));
     }
 }

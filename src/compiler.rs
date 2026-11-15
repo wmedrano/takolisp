@@ -86,7 +86,10 @@ impl<'a> Compiler<'a> {
                 self.compile_one(value, false)?;
                 self.push(Instruction::Define(name.clone()));
             }
-            AstKind::Lookup { module: _, name } => self.compile_lookup(name),
+            AstKind::Lookup {
+                module_alias: _,
+                name,
+            } => self.compile_lookup(name),
             AstKind::Lambda {
                 name,
                 parameters,
@@ -275,7 +278,7 @@ mod tests {
     fn non_tail_begin_pops_intermediate_values() {
         let expr = ast(AstKind::Eval {
             func: Box::new(ast(AstKind::Lookup {
-                module: ModuleId::USER,
+                module_alias: None,
                 name: "+".into(),
             })),
             args: vec![ast(AstKind::Begin(vec![

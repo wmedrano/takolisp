@@ -47,6 +47,7 @@ pub enum VmError {
         module: crate::ModuleId,
         name: Symbol,
     },
+    ParseError(crate::ast::AstBuilderError),
 }
 
 #[cfg(test)]

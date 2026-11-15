@@ -26,7 +26,7 @@ pub enum AstKind {
         value: Box<Ast>,
     },
     Lookup {
-        module: ModuleId,
+        module_alias: Option<Symbol>,
         name: Symbol,
     },
     Begin(Vec<Ast>),
@@ -77,9 +77,23 @@ impl Ast {
 
     fn from_sexpr(expr: &SExpr, module: &ModuleId) -> Result<Ast, AstBuilderError> {
         let kind = match &expr.kind {
-            SExprKind::Ident(ident) => AstKind::Lookup {
-                module: module.clone(),
-                name: Symbol::from(ident.as_str()),
+            SExprKind::Ident(ident) => match ident.as_str().split_once('.') {
+                Some((alias, name)) => {
+                    if alias.is_empty() || name.is_empty() {
+                        return Err(AstBuilderError {
+                            kind: AstBuilderErrorKind::InvalidLookup,
+                            span: expr.span,
+                        });
+                    }
+                    AstKind::Lookup {
+                        module_alias: Some(Symbol::from(alias)),
+                        name: Symbol::from(name),
+                    }
+                }
+                None => AstKind::Lookup {
+                    module_alias: None,
+                    name: Symbol::from(ident.as_str()),
+                },
             },
             SExprKind::Const(val) => AstKind::Const(val.clone()),
             SExprKind::List(items) => AstKind::from_list(items, expr.span, module)?,
@@ -375,6 +389,7 @@ pub enum AstBuilderErrorKind {
     InvalidLambdaParameters,
     InvalidDefineTarget,
     InvalidImport,
+    InvalidLookup,
     NotImplemented(&'static str),
 }
 
@@ -509,7 +524,7 @@ mod tests {
             Ast::parse_in(ModuleId::USER, "identifier"),
             Ok(Ast {
                 kind: AstKind::Lookup {
-                    module: ModuleId::USER,
+                    module_alias: None,
                     name: "identifier".into(),
                 },
                 span: (0..10).into()
@@ -518,34 +533,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_in_records_module_on_lookups() {
-        let module = ModuleId::internal("math");
+    fn qualified_identifier_parses_alias_and_name() {
         assert_eq!(
-            Ast::parse_in(module.clone(), "(+ x 1)"),
+            Ast::parse_in(ModuleId::USER, "math.add"),
             Ok(Ast {
-                kind: AstKind::Eval {
-                    func: Box::new(Ast {
-                        kind: AstKind::Lookup {
-                            module: module.clone(),
-                            name: "+".into(),
-                        },
-                        span: (1..2).into(),
-                    }),
-                    args: vec![
-                        Ast {
-                            kind: AstKind::Lookup {
-                                module,
-                                name: "x".into(),
-                            },
-                            span: (3..4).into(),
-                        },
-                        Ast {
-                            kind: AstKind::Const(Val::Int(1)),
-                            span: (5..6).into(),
-                        },
-                    ],
+                kind: AstKind::Lookup {
+                    module_alias: Some("math".into()),
+                    name: "add".into(),
                 },
-                span: (0..7).into(),
+                span: (0..8).into(),
+            })
+        );
+
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, ".foo"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLookup,
+                span: (0..4).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse_in(ModuleId::USER, "foo."),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLookup,
+                span: (0..4).into(),
             })
         );
     }
@@ -558,7 +569,7 @@ mod tests {
                 kind: AstKind::Eval {
                     func: Box::new(Ast {
                         kind: AstKind::Lookup {
-                            module: ModuleId::USER,
+                            module_alias: None,
                             name: "a".into(),
                         },
                         span: (1..2).into()
@@ -567,14 +578,14 @@ mod tests {
                         kind: AstKind::Eval {
                             func: Box::new(Ast {
                                 kind: AstKind::Lookup {
-                                    module: ModuleId::USER,
+                                    module_alias: None,
                                     name: "b".into(),
                                 },
                                 span: (4..5).into()
                             }),
                             args: vec![Ast {
                                 kind: AstKind::Lookup {
-                                    module: ModuleId::USER,
+                                    module_alias: None,
                                     name: "c".into(),
                                 },
                                 span: (6..7).into(),
@@ -812,7 +823,7 @@ mod tests {
                                 kind: AstKind::Eval {
                                     func: Box::new(Ast {
                                         kind: AstKind::Lookup {
-                                            module: ModuleId::USER,
+                                            module_alias: None,
                                             name: "+".into(),
                                         },
                                         span: (19..20).into(),
@@ -820,7 +831,7 @@ mod tests {
                                     args: vec![
                                         Ast {
                                             kind: AstKind::Lookup {
-                                                module: ModuleId::USER,
+                                                module_alias: None,
                                                 name: "bar".into(),
                                             },
                                             span: (21..24).into(),
