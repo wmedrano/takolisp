@@ -68,7 +68,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_one(&mut self, ast: &Ast, tail_call: bool) -> Result<(), CompilerError> {
         match &ast.kind {
-            AstKind::Begin(exprs) => {
+            AstKind::Begin(exprs) | AstKind::TopLevel(exprs) => {
                 self.compile_begin(exprs.as_slice(), tail_call)?;
                 return Ok(());
             }

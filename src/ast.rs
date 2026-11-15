@@ -30,6 +30,7 @@ pub enum AstKind {
         name: Symbol,
     },
     Begin(Vec<Ast>),
+    TopLevel(Vec<Ast>),
     If {
         pred: Box<Ast>,
         then_branch: Box<Ast>,
@@ -58,16 +59,16 @@ impl Ast {
         for ast_res in AstBuilder::new(module).iter(source) {
             asts.push(ast_res?);
         }
-        match asts.len() {
-            0 => Ok(Ast {
+        match asts.as_mut_slice() {
+            [] => Ok(Ast {
                 kind: AstKind::Const(Val::Nil),
                 span: (0..0).into(),
             }),
-            1 => Ok(std::mem::take(asts.first_mut().unwrap())),
-            _ => {
-                let span = (asts[0].span.start..asts.last().unwrap().span.end).into();
+            [ast] => Ok(std::mem::take(ast)),
+            [first, .., last] => {
+                let span = (first.span.start..last.span.end).into();
                 Ok(Ast {
-                    kind: AstKind::Begin(asts),
+                    kind: AstKind::TopLevel(asts),
                     span,
                 })
             }
@@ -483,7 +484,7 @@ mod tests {
         assert_eq!(
             Ast::parse_in(ModuleId::USER, "1 2.0 \"hello\""),
             Ok(Ast {
-                kind: AstKind::Begin(vec![
+                kind: AstKind::TopLevel(vec![
                     Ast {
                         kind: AstKind::Const(Val::Int(1)),
                         span: (0..1).into(),
