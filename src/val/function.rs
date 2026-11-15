@@ -49,7 +49,7 @@ impl BytecodeFunction {
 pub enum Instruction {
     PushConst(Val),
     Define(Symbol),
-    LookupGlobal(Symbol),
+    Lookup(ModuleId, Symbol),
     LookupLocal(usize),
     Eval(usize),
     Pop(usize),

@@ -13,6 +13,11 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompilerError {
     ModuleNotFound(ModuleId),
+    ImportNotFound {
+        module: ModuleId,
+        alias: Symbol,
+    },
+    ImportNotAtTopLevel,
 }
 
 pub struct Compiler<'a> {
@@ -56,8 +61,68 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_to_instructions(mut self, ast: &Ast) -> Result<Vec<Instruction>, CompilerError> {
+        self.prepare_module(ast, true)?;
         self.compile_one(ast, true)?;
         Ok(self.instructions)
+    }
+
+    fn prepare_module(&mut self, ast: &Ast, is_top_level: bool) -> Result<(), CompilerError> {
+        match &ast.kind {
+            AstKind::Define { name, value } => {
+                let current_module = self
+                    .modules
+                    .get_mut(&self.module)
+                    .ok_or_else(|| CompilerError::ModuleNotFound(self.module.clone()))?;
+                if current_module.get(name).is_none() {
+                    current_module.insert(name.clone(), Val::Undefined);
+                }
+                self.prepare_module(value, false)?;
+            }
+            AstKind::Import { module, alias } => {
+                if !is_top_level {
+                    return Err(CompilerError::ImportNotAtTopLevel);
+                }
+                let current_module = self
+                    .modules
+                    .get_mut(&self.module)
+                    .ok_or_else(|| CompilerError::ModuleNotFound(self.module.clone()))?;
+                current_module.import(alias.clone(), module.clone());
+            }
+            AstKind::TopLevel(exprs) => {
+                for expr in exprs {
+                    self.prepare_module(expr, is_top_level)?;
+                }
+            }
+            AstKind::Begin(exprs) => {
+                for expr in exprs {
+                    self.prepare_module(expr, false)?;
+                }
+            }
+            AstKind::Eval { func, args } => {
+                self.prepare_module(func, false)?;
+                for arg in args {
+                    self.prepare_module(arg, false)?;
+                }
+            }
+            AstKind::If {
+                pred,
+                then_branch,
+                else_branch,
+            } => {
+                self.prepare_module(pred, false)?;
+                self.prepare_module(then_branch, false)?;
+                if let Some(else_branch) = else_branch {
+                    self.prepare_module(else_branch, false)?;
+                }
+            }
+            AstKind::Lambda { body, .. } => {
+                for expr in body {
+                    self.prepare_module(expr, false)?;
+                }
+            }
+            AstKind::Const(_) | AstKind::Lookup { .. } => {}
+        }
+        Ok(())
     }
 
     fn push(&mut self, instruction: Instruction) -> usize {
@@ -86,21 +151,15 @@ impl<'a> Compiler<'a> {
                 self.compile_one(value, false)?;
                 self.push(Instruction::Define(name.clone()));
             }
-            AstKind::Lookup {
-                module_alias: _,
-                name,
-            } => self.compile_lookup(name),
+            AstKind::Lookup { module_alias, name } => {
+                self.compile_lookup(module_alias.as_ref(), name)?
+            }
             AstKind::Lambda {
                 name,
                 parameters,
                 body,
             } => self.compile_lambda(name.clone(), parameters.clone(), body)?,
-            AstKind::Import { module, alias } => {
-                let current_module = self
-                    .modules
-                    .get_mut(&self.module)
-                    .ok_or_else(|| CompilerError::ModuleNotFound(self.module.clone()))?;
-                current_module.import(alias.clone(), module.clone());
+            AstKind::Import { .. } => {
                 self.compile_const(Val::Nil);
             }
         }
@@ -119,13 +178,43 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_lookup(&mut self, ident: &Symbol) {
-        let param_position = self.parameters.iter().rposition(|param| param == ident);
-        let instruction = match param_position {
-            Some(idx) => Instruction::LookupLocal(idx),
-            None => Instruction::LookupGlobal(ident.clone()),
+    fn compile_lookup(
+        &mut self,
+        module_alias: Option<&Symbol>,
+        ident: &Symbol,
+    ) -> Result<(), CompilerError> {
+        if let Some(alias) = module_alias {
+            let current_module = self
+                .modules
+                .get(&self.module)
+                .ok_or_else(|| CompilerError::ModuleNotFound(self.module.clone()))?;
+            let target_module = current_module
+                .get_import(alias)
+                .ok_or_else(|| CompilerError::ImportNotFound {
+                    module: self.module.clone(),
+                    alias: alias.clone(),
+                })?;
+            self.push(Instruction::Lookup(target_module.clone(), ident.clone()));
+            return Ok(());
+        }
+
+        if let Some(idx) = self.parameters.iter().rposition(|param| param == ident) {
+            self.push(Instruction::LookupLocal(idx));
+            return Ok(());
+        }
+
+        let current_module = self
+            .modules
+            .get(&self.module)
+            .ok_or_else(|| CompilerError::ModuleNotFound(self.module.clone()))?;
+
+        let target_module = if current_module.get(ident).is_some() {
+            self.module.clone()
+        } else {
+            ModuleId::GLOBAL
         };
-        self.push(instruction);
+        self.push(Instruction::Lookup(target_module, ident.clone()));
+        Ok(())
     }
 
     fn compile_const(&mut self, val: Val) {
@@ -226,7 +315,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             instructions,
-            vec![Instruction::LookupGlobal("+".into()), Instruction::Return]
+            vec![
+                Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
+                Instruction::Return
+            ]
         );
     }
 
@@ -293,7 +385,7 @@ mod tests {
         assert_eq!(
             instructions,
             vec![
-                Instruction::LookupGlobal("+".into()),
+                Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
                 Instruction::PushConst(Val::Int(1)),
                 Instruction::PushConst(Val::Int(2)),
                 Instruction::Pop(2),
@@ -351,7 +443,7 @@ mod tests {
         assert_eq!(
             instructions,
             vec![
-                Instruction::LookupGlobal("+".into()),
+                Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
                 Instruction::PushConst(Val::Bool(true)),
                 Instruction::JumpIfNot(2),
                 Instruction::PushConst(Val::Int(1)),
@@ -372,7 +464,7 @@ mod tests {
         assert_eq!(
             instructions,
             vec![
-                Instruction::LookupGlobal("+".into()),
+                Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
                 Instruction::PushConst(Val::Int(1)),
                 Instruction::PushConst(Val::Int(2)),
                 Instruction::Eval(2),
@@ -395,7 +487,7 @@ mod tests {
                     name: None,
                     parameters: vec!["x".into(), "y".into()],
                     instructions: vec![
-                        Instruction::LookupGlobal("+".into()),
+                        Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
                         Instruction::LookupLocal(0),
                         Instruction::LookupLocal(1),
                         Instruction::Eval(2),
@@ -428,8 +520,8 @@ mod tests {
                             name: None,
                             parameters: vec!["y".into()],
                             instructions: vec![
-                                Instruction::LookupGlobal("+".into()),
-                                Instruction::LookupGlobal("x".into()),
+                                Instruction::Lookup(ModuleId::GLOBAL, "+".into()),
+                                Instruction::Lookup(ModuleId::GLOBAL, "x".into()),
                                 Instruction::LookupLocal(0),
                                 Instruction::Eval(2),
                                 Instruction::Return,
@@ -515,5 +607,152 @@ mod tests {
             compiler.compile_to_instructions(&expr),
             Err(CompilerError::ModuleNotFound(current))
         );
+    }
+
+    #[test]
+    fn initial_pass_sets_undefined_defines_without_overwriting_existing() {
+        let mut modules = HashMap::new();
+        let current = ModuleId::USER;
+        let mut user_mod = Module::new(current.clone());
+        user_mod.insert("existing", Val::Int(99));
+        modules.insert(current.clone(), user_mod);
+
+        let expr = Ast::parse_in(
+            current.clone(),
+            "(define existing 1) (define fresh 2) (lambda () (define nested 3))",
+        )
+        .unwrap();
+        Compiler::for_module(current.clone(), &mut modules)
+            .compile_to_instructions(&expr)
+            .unwrap();
+
+        let user_mod = modules.get(&current).unwrap();
+        assert_eq!(user_mod.get(&"existing".into()), Some(&Val::Int(99)));
+        assert_eq!(user_mod.get(&"fresh".into()), Some(&Val::Undefined));
+        assert_eq!(user_mod.get(&"nested".into()), Some(&Val::Undefined));
+    }
+
+    #[test]
+    fn lookup_uses_current_module_for_defined_symbols_including_forward_refs() {
+        let mut modules = HashMap::new();
+        let current = ModuleId::file("examples/app.tl");
+        let expr = Ast::parse_in(
+            current.clone(),
+            "(define f (lambda () g)) (define g 42) g",
+        )
+        .unwrap();
+        let instructions = Compiler::for_module(current.clone(), &mut modules)
+            .compile_to_instructions(&expr)
+            .unwrap();
+
+        assert_eq!(
+            instructions.last(),
+            Some(&Instruction::Return)
+        );
+        assert!(instructions.contains(&Instruction::Lookup(current.clone(), "g".into())));
+        let Val::BytecodeFunction(f) = (match &instructions[0] {
+            Instruction::PushConst(val) => val,
+            other => panic!("expected PushConst, got {other:?}"),
+        }) else {
+            panic!("expected BytecodeFunction");
+        };
+        assert_eq!(
+            f.instructions.as_ref(),
+            &[
+                Instruction::Lookup(current, "g".into()),
+                Instruction::Return
+            ]
+        );
+    }
+
+    #[test]
+    fn lookup_resolves_module_alias_via_imports() {
+        let mut modules = HashMap::new();
+        let current = ModuleId::USER;
+        let expr =
+            Ast::parse_in(current.clone(), r#"(import "lib/math.tl" as m) m.add"#)
+                .unwrap();
+        let instructions = Compiler::for_module(current, &mut modules)
+            .compile_to_instructions(&expr)
+            .unwrap();
+
+        assert_eq!(
+            instructions,
+            vec![
+                Instruction::PushConst(Val::Nil),
+                Instruction::Lookup(ModuleId::file("lib/math.tl"), "add".into()),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn lookup_with_unknown_module_alias_returns_error() {
+        let mut modules = HashMap::new();
+        let current = ModuleId::USER;
+        let expr = Ast::parse_in(current.clone(), "unknown.fn").unwrap();
+        let res = Compiler::for_module(current.clone(), &mut modules)
+            .compile_to_instructions(&expr);
+
+        assert_eq!(
+            res,
+            Err(CompilerError::ImportNotFound {
+                module: current,
+                alias: "unknown".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn import_after_lookup_is_resolved_by_initial_pass() {
+        let mut modules = HashMap::new();
+        let current = ModuleId::USER;
+        let expr = Ast::parse_in(
+            current.clone(),
+            r#"(define f (lambda () m.add)) (import "lib/math.tl" as m)"#,
+        )
+        .unwrap();
+        let instructions = Compiler::for_module(current, &mut modules)
+            .compile_to_instructions(&expr)
+            .unwrap();
+
+        let Val::BytecodeFunction(f) = (match &instructions[0] {
+            Instruction::PushConst(val) => val,
+            other => panic!("expected PushConst, got {other:?}"),
+        }) else {
+            panic!("expected BytecodeFunction");
+        };
+        assert_eq!(
+            f.instructions.as_ref(),
+            &[
+                Instruction::Lookup(ModuleId::file("lib/math.tl"), "add".into()),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn non_top_level_import_returns_error() {
+        for source in [
+            r#"(if #true (import "lib/math.tl"))"#,
+            r#"(lambda () (import "lib/math.tl"))"#,
+            r#"(define x (import "lib/math.tl"))"#,
+            r#"(+ (import "lib/math.tl"))"#,
+        ] {
+            let mut modules = HashMap::new();
+            let expr = Ast::parse_in(ModuleId::USER, source).unwrap();
+            let res =
+                Compiler::for_module(ModuleId::USER, &mut modules).compile_to_instructions(&expr);
+            assert_eq!(res, Err(CompilerError::ImportNotAtTopLevel), "{source}");
+        }
+
+        let begin_import = ast(AstKind::Begin(vec![ast(AstKind::Import {
+            module: ModuleId::file("lib/math.tl"),
+            alias: "math".into(),
+        })]));
+        let mut modules = HashMap::new();
+        let res =
+            Compiler::for_module(ModuleId::USER, &mut modules).compile_to_instructions(&begin_import);
+        assert_eq!(res, Err(CompilerError::ImportNotAtTopLevel));
     }
 }

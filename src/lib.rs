@@ -4,7 +4,7 @@ use crate::{
     ast::{Ast, AstBuilderError},
     builtins::PLUS_FN,
     compiler::{Compiler, CompilerError},
-    val::{Symbol, Val, VmError, function::Instruction},
+    val::{Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
 pub mod ast;
@@ -33,6 +33,10 @@ impl From<CompilerError> for VmError {
     fn from(err: CompilerError) -> Self {
         match err {
             CompilerError::ModuleNotFound(id) => VmError::ModuleNotFound(id),
+            CompilerError::ImportNotFound { module, alias } => {
+                VmError::ImportNotFound { module, alias }
+            }
+            CompilerError::ImportNotAtTopLevel => VmError::ImportNotAtTopLevel,
         }
     }
 }
@@ -76,21 +80,6 @@ impl Vm {
         self.modules
             .entry(id.clone())
             .or_insert_with(|| Module::new(id.clone()))
-    }
-
-    fn lookup(&self, module: &ModuleId, sym: &Symbol) -> Val {
-        self.modules
-            .get(module)
-            .and_then(|m| m.get(sym))
-            .filter(|v| !matches!(v, Val::Undefined))
-            .or_else(|| {
-                self.modules
-                    .get(&ModuleId::GLOBAL)
-                    .and_then(|m| m.get(sym))
-                    .filter(|v| !matches!(v, Val::Undefined))
-            })
-            .cloned()
-            .unwrap_or(Val::Undefined)
     }
 
     pub fn eval(&mut self, func: Val, args: impl IntoIterator<Item = Val>) -> Result<Val, VmError> {
@@ -149,14 +138,19 @@ impl Vm {
                         .ok_or_else(|| VmError::ModuleNotFound(call_frame.module.clone()))?
                         .insert(sym.clone(), val);
                 }
-                Instruction::LookupGlobal(sym) => {
-                    let val = self.lookup(&call_frame.module, sym);
-                    if matches!(val, Val::Undefined) {
-                        return Err(VmError::SymbolNotFound {
-                            module: call_frame.module.clone(),
+                Instruction::Lookup(module, sym) => {
+                    let mod_ref = self
+                        .modules
+                        .get(module)
+                        .ok_or_else(|| VmError::ModuleNotFound(module.clone()))?;
+                    let val = mod_ref
+                        .get(sym)
+                        .filter(|v| !matches!(v, Val::Undefined))
+                        .ok_or_else(|| VmError::SymbolNotFound {
+                            module: module.clone(),
                             name: sym.clone(),
-                        });
-                    }
+                        })?
+                        .clone();
                     self.stack.push(val);
                 }
                 Instruction::LookupLocal(idx) => {
@@ -231,6 +225,7 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val::Symbol;
 
     #[test]
     fn function_is_called() {
@@ -502,7 +497,7 @@ mod tests {
             parameters: vec![],
             instructions: [
                 Instruction::PushConst(Val::Int(42)),
-                Instruction::Define(Symbol::from("x")),
+                Instruction::Define(crate::val::Symbol::from("x")),
                 Instruction::PushConst(Val::Nil),
                 Instruction::Return,
             ]
@@ -513,9 +508,36 @@ mod tests {
     }
 
     #[test]
+    fn import_allows_qualified_lookup_across_modules() {
+        let mut vm = Vm::new();
+        let math_mod = ModuleId::file("lib/math.tl");
+        assert_eq!(
+            vm.eval_str_in(math_mod, "(define inc (lambda (x) (+ x 1)))"),
+            Ok(Val::Nil)
+        );
+
+        assert_eq!(
+            vm.eval_str(r#"(import "lib/math.tl" as m) (m.inc 41)"#),
+            Ok(Val::Int(42))
+        );
+    }
+
+    #[test]
     fn eval_str_returns_parse_error_instead_of_panicking() {
         let mut vm = Vm::new();
         assert!(matches!(vm.eval_str(".foo"), Err(VmError::ParseError(_))));
         assert!(matches!(vm.eval_str("(import)"), Err(VmError::ParseError(_))));
+    }
+
+    #[test]
+    fn lookup_of_uninitialized_define_returns_symbol_not_found() {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval_str("(define (f) g) (f) (define g 42)"),
+            Err(VmError::SymbolNotFound {
+                module: ModuleId::USER,
+                name: Symbol::from("g"),
+            })
+        );
     }
 }

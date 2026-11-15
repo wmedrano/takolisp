@@ -43,6 +43,11 @@ pub enum VmError {
     NotCallable(Val),
     InvalidType { expected: &'static str, actual: Val },
     ModuleNotFound(crate::ModuleId),
+    ImportNotFound {
+        module: crate::ModuleId,
+        alias: Symbol,
+    },
+    ImportNotAtTopLevel,
     SymbolNotFound {
         module: crate::ModuleId,
         name: Symbol,
