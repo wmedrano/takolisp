@@ -322,6 +322,26 @@ mod tests {
     }
 
     #[test]
+    fn define_function_shorthand_binds_callable_lambda() {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval_str("(define (add-and-inc a b) (+ a b) (+ a b 1)) (add-and-inc 3 4)"),
+            Ok(Val::Int(8))
+        );
+        assert_eq!(vm.eval_str("(define (noop)) (noop)"), Ok(Val::Nil));
+
+        let Val::BytecodeFunction(named_fn) = vm.eval_str("add-and-inc").unwrap() else {
+            panic!("expected bytecode function");
+        };
+        assert_eq!(named_fn.name, Some(Symbol::from("add-and-inc")));
+
+        let Val::BytecodeFunction(anon_fn) = vm.eval_str("(lambda () 1)").unwrap() else {
+            panic!("expected bytecode function");
+        };
+        assert_eq!(anon_fn.name, None);
+    }
+
+    #[test]
     fn eval_str_defaults_to_user_internal_module() {
         let mut vm = Vm::new();
         assert_eq!(vm.eval_str("(define x 42)"), Ok(Val::Nil));
@@ -450,6 +470,7 @@ mod tests {
         let missing_mod = ModuleId::internal("missing");
         let func = Val::BytecodeFunction(BytecodeFunction {
             module: missing_mod.clone(),
+            name: None,
             parameters: vec![],
             instructions: [
                 Instruction::PushConst(Val::Int(42)),

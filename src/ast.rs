@@ -28,6 +28,7 @@ pub enum AstKind {
     Begin(Vec<Ast>),
     If(IfAst),
     Lambda {
+        name: Option<Symbol>,
         parameters: Vec<Symbol>,
         body: Vec<Ast>,
     },
@@ -112,25 +113,60 @@ impl AstKind {
     }
 
     fn parse_define(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
-        let [name, value] = args else {
+        let [target, rest @ ..] = args else {
             return Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidArgCount {
                     expected: "2",
-                    actual: args.len(),
+                    actual: 0,
                 },
                 span,
             });
         };
-        let SExprKind::Ident(ident) = &name.kind else {
-            return Err(AstBuilderError {
+        match &target.kind {
+            SExprKind::Ident(ident) => {
+                let [value] = rest else {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidArgCount {
+                            expected: "2",
+                            actual: args.len(),
+                        },
+                        span,
+                    });
+                };
+                Ok(AstKind::Define {
+                    name: Symbol::from(ident.as_str()),
+                    value: Box::new(Ast::try_from(value)?),
+                })
+            }
+            SExprKind::List(sig) => {
+                let [fn_name, params @ ..] = sig.as_slice() else {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidDefineTarget,
+                        span: target.span,
+                    });
+                };
+                let SExprKind::Ident(ident) = &fn_name.kind else {
+                    return Err(AstBuilderError {
+                        kind: AstBuilderErrorKind::InvalidDefineTarget,
+                        span: fn_name.span,
+                    });
+                };
+                let lambda_end = rest.last().map_or(target.span.end, |last| last.span.end);
+                let lambda_span = (target.span.start..lambda_end).into();
+                let name = Symbol::from(ident.as_str());
+                Ok(AstKind::Define {
+                    name: name.clone(),
+                    value: Box::new(Ast {
+                        span: lambda_span,
+                        kind: Self::build_lambda(Some(name), params, rest)?,
+                    }),
+                })
+            }
+            SExprKind::Const(_) => Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidDefineTarget,
-                span: name.span,
-            });
-        };
-        Ok(AstKind::Define {
-            name: Symbol::from(ident.as_str()),
-            value: Box::new(Ast::try_from(value)?),
-        })
+                span: target.span,
+            }),
+        }
     }
 
     fn parse_if(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
@@ -171,7 +207,15 @@ impl AstKind {
                 span,
             });
         };
-        let mut parameters = Vec::new();
+        Self::build_lambda(None, params, body)
+    }
+
+    fn build_lambda(
+        name: Option<Symbol>,
+        params: &[SExpr],
+        body: &[SExpr],
+    ) -> Result<AstKind, AstBuilderError> {
+        let mut parameters = Vec::with_capacity(params.len());
         for param in params {
             let SExprKind::Ident(name) = &param.kind else {
                 return Err(AstBuilderError {
@@ -183,9 +227,13 @@ impl AstKind {
         }
         let body = body
             .iter()
-            .map(|b| -> Result<Ast, AstBuilderError> { Ast::try_from(b) })
+            .map(Ast::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(AstKind::Lambda { parameters, body })
+        Ok(AstKind::Lambda {
+            name,
+            parameters,
+            body,
+        })
     }
 }
 
@@ -475,6 +523,7 @@ mod tests {
             Ast::parse("(lambda ())"),
             Ok(Ast {
                 kind: AstKind::Lambda {
+                    name: None,
                     parameters: vec![],
                     body: vec![]
                 },
@@ -485,6 +534,7 @@ mod tests {
             Ast::parse("(lambda () 1 2)"),
             Ok(Ast {
                 kind: AstKind::Lambda {
+                    name: None,
                     parameters: vec![],
                     body: vec![
                         Ast {
@@ -574,10 +624,117 @@ mod tests {
             })
         );
         assert_eq!(
-            Ast::parse("(define (x) 1)"),
+            Ast::parse("(define () 1)"),
             Err(AstBuilderError {
                 kind: AstBuilderErrorKind::InvalidDefineTarget,
-                span: (8..11).into(),
+                span: (8..10).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(define (1 x) x)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidDefineTarget,
+                span: (9..10).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn define_lambda_parsed_as_define_with_lambda() {
+        assert_eq!(
+            Ast::parse("(define (foo bar) (+ bar 1))"),
+            Ok(Ast {
+                kind: AstKind::Define {
+                    name: "foo".into(),
+                    value: Box::new(Ast {
+                        kind: AstKind::Lambda {
+                            name: Some("foo".into()),
+                            parameters: vec!["bar".into()],
+                            body: vec![Ast {
+                                kind: AstKind::Eval {
+                                    func: Box::new(Ast {
+                                        kind: AstKind::Lookup("+".into()),
+                                        span: (19..20).into(),
+                                    }),
+                                    args: vec![
+                                        Ast {
+                                            kind: AstKind::Lookup("bar".into()),
+                                            span: (21..24).into(),
+                                        },
+                                        Ast {
+                                            kind: AstKind::Const(Val::Int(1)),
+                                            span: (25..26).into(),
+                                        },
+                                    ],
+                                },
+                                span: (18..27).into(),
+                            }],
+                        },
+                        span: (8..27).into(),
+                    }),
+                },
+                span: (0..28).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(define (foo) 1 2)"),
+            Ok(Ast {
+                kind: AstKind::Define {
+                    name: "foo".into(),
+                    value: Box::new(Ast {
+                        kind: AstKind::Lambda {
+                            name: Some("foo".into()),
+                            parameters: vec![],
+                            body: vec![
+                                Ast {
+                                    kind: AstKind::Const(Val::Int(1)),
+                                    span: (14..15).into(),
+                                },
+                                Ast {
+                                    kind: AstKind::Const(Val::Int(2)),
+                                    span: (16..17).into(),
+                                },
+                            ],
+                        },
+                        span: (8..17).into(),
+                    }),
+                },
+                span: (0..18).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(define (foo))"),
+            Ok(Ast {
+                kind: AstKind::Define {
+                    name: "foo".into(),
+                    value: Box::new(Ast {
+                        kind: AstKind::Lambda {
+                            name: Some("foo".into()),
+                            parameters: vec![],
+                            body: vec![],
+                        },
+                        span: (8..13).into(),
+                    }),
+                },
+                span: (0..14).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn define_lambda_with_non_symbol_param_is_error() {
+        assert_eq!(
+            Ast::parse("(define (foo 1) 1)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (13..14).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(define (foo x (y)) x)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (15..18).into(),
             })
         );
     }

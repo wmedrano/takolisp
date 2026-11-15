@@ -26,9 +26,10 @@ impl Compiler {
         Self::new(module, Vec::new())
     }
 
-    fn into_bytecode(self) -> BytecodeFunction {
+    fn into_bytecode(self, name: Option<Symbol>) -> BytecodeFunction {
         BytecodeFunction {
             module: self.module,
+            name,
             parameters: self.parameters,
             instructions: self.instructions.into(),
         }
@@ -47,33 +48,29 @@ impl Compiler {
 
     fn compile_one(&mut self, ast: &Ast, tail_call: bool) {
         match &ast.kind {
-            AstKind::Const(val) => {
-                self.compile_const(val.clone(), tail_call);
+            AstKind::Begin(exprs) => {
+                self.compile_begin(exprs.as_slice(), tail_call);
+                return;
             }
-            AstKind::Eval { func, args } => {
-                self.compile_eval(func, args.as_slice());
-                if tail_call {
-                    self.push(Instruction::Return);
-                }
+            AstKind::If(if_ast) => {
+                self.compile_if(if_ast, tail_call);
+                return;
             }
+            AstKind::Const(val) => self.compile_const(val.clone()),
+            AstKind::Eval { func, args } => self.compile_eval(func, args.as_slice()),
             AstKind::Define { name, value } => {
                 self.compile_one(value, false);
                 self.push(Instruction::Define(name.clone()));
-                if tail_call {
-                    self.push(Instruction::Return);
-                }
             }
-            AstKind::Lookup(ident) => {
-                self.compile_lookup(ident);
-                if tail_call {
-                    self.push(Instruction::Return);
-                }
-            }
-            AstKind::Begin(exprs) => self.compile_begin(exprs.as_slice(), tail_call),
-            AstKind::If(if_ast) => self.compile_if(if_ast, tail_call),
-            AstKind::Lambda { parameters, body } => {
-                self.compile_lambda(parameters.clone(), body, tail_call)
-            }
+            AstKind::Lookup(ident) => self.compile_lookup(ident),
+            AstKind::Lambda {
+                name,
+                parameters,
+                body,
+            } => self.compile_lambda(name.clone(), parameters.clone(), body),
+        }
+        if tail_call {
+            self.push(Instruction::Return);
         }
     }
 
@@ -94,11 +91,8 @@ impl Compiler {
         self.push(instruction);
     }
 
-    fn compile_const(&mut self, val: Val, tail_call: bool) {
+    fn compile_const(&mut self, val: Val) {
         self.push(Instruction::PushConst(val));
-        if tail_call {
-            self.push(Instruction::Return);
-        }
     }
 
     fn compile_begin(&mut self, exprs: &[Ast], tail_call: bool) {
@@ -152,11 +146,11 @@ impl Compiler {
         }
     }
 
-    fn compile_lambda(&mut self, parameters: Vec<Symbol>, body: &[Ast], tail_call: bool) {
+    fn compile_lambda(&mut self, name: Option<Symbol>, parameters: Vec<Symbol>, body: &[Ast]) {
         let mut sub_compiler = Compiler::new(self.module.clone(), parameters);
         sub_compiler.compile_begin(body, true);
-        let lambda_val = Val::BytecodeFunction(sub_compiler.into_bytecode());
-        self.compile_const(lambda_val, tail_call);
+        let lambda_val = Val::BytecodeFunction(sub_compiler.into_bytecode(name));
+        self.compile_const(lambda_val);
     }
 }
 
@@ -324,6 +318,7 @@ mod tests {
             vec![
                 Instruction::PushConst(Val::BytecodeFunction(BytecodeFunction {
                     module: ModuleId::internal("user"),
+                    name: None,
                     parameters: vec!["x".into(), "y".into()],
                     instructions: vec![
                         Instruction::LookupGlobal("+".into()),
@@ -349,10 +344,12 @@ mod tests {
             vec![
                 Instruction::PushConst(Val::BytecodeFunction(BytecodeFunction {
                     module: module.clone(),
+                    name: None,
                     parameters: vec!["x".into()],
                     instructions: vec![
                         Instruction::PushConst(Val::BytecodeFunction(BytecodeFunction {
                             module,
+                            name: None,
                             parameters: vec!["y".into()],
                             instructions: vec![
                                 Instruction::LookupGlobal("+".into()),

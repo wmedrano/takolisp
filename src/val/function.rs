@@ -34,6 +34,7 @@ impl PartialEq for NativeFunction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BytecodeFunction {
     pub(crate) module: ModuleId,
+    pub(crate) name: Option<Symbol>,
     pub(crate) parameters: Vec<Symbol>,
     pub(crate) instructions: Arc<[Instruction]>,
 }
