@@ -72,11 +72,19 @@ impl Vm {
             .or_insert_with(|| Module::new(id.clone()))
     }
 
-    fn lookup(&self, module: &ModuleId, sym: &Symbol) -> Option<&Val> {
+    fn lookup(&self, module: &ModuleId, sym: &Symbol) -> Val {
         self.modules
             .get(module)
             .and_then(|m| m.get(sym))
-            .or_else(|| self.modules.get(&ModuleId::GLOBAL).and_then(|m| m.get(sym)))
+            .filter(|v| !matches!(v, Val::Undefined))
+            .or_else(|| {
+                self.modules
+                    .get(&ModuleId::GLOBAL)
+                    .and_then(|m| m.get(sym))
+                    .filter(|v| !matches!(v, Val::Undefined))
+            })
+            .cloned()
+            .unwrap_or(Val::Undefined)
     }
 
     pub fn eval(&mut self, func: Val, args: impl IntoIterator<Item = Val>) -> Result<Val, VmError> {
@@ -136,7 +144,13 @@ impl Vm {
                         .insert(sym.clone(), val);
                 }
                 Instruction::LookupGlobal(sym) => {
-                    let val = self.lookup(&call_frame.module, sym).unwrap().clone();
+                    let val = self.lookup(&call_frame.module, sym);
+                    if matches!(val, Val::Undefined) {
+                        return Err(VmError::SymbolNotFound {
+                            module: call_frame.module.clone(),
+                            name: sym.clone(),
+                        });
+                    }
                     self.stack.push(val);
                 }
                 Instruction::LookupLocal(idx) => {

@@ -9,6 +9,7 @@ use function::{BytecodeFunction, NativeFunction};
 pub enum Val {
     #[default]
     Nil,
+    Undefined,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -42,6 +43,10 @@ pub enum VmError {
     NotCallable(Val),
     InvalidType { expected: &'static str, actual: Val },
     ModuleNotFound(crate::ModuleId),
+    SymbolNotFound {
+        module: crate::ModuleId,
+        name: Symbol,
+    },
 }
 
 #[cfg(test)]
