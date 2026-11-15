@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::val::{Val, VmError};
+use crate::val::{Symbol, Val, VmError};
 
 pub struct NativeFunction {
     func: fn(&[Val]) -> Result<Val, VmError>,
@@ -30,13 +30,15 @@ impl PartialEq for NativeFunction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BytecodeFunction {
+    pub(crate) parameters: Vec<Symbol>,
     pub(crate) instructions: Arc<[Instruction]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     PushConst(Val),
-    Lookup(String),
+    LookupGlobal(Symbol),
+    LookupLocal(usize),
     Eval(usize),
     Pop(usize),
     Jump(usize),

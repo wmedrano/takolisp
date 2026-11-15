@@ -1,7 +1,7 @@
 use crate::{
     reader::{Atom, Reader, ReaderErrorKind},
     tokenizer::{Span, Token},
-    val::Val,
+    val::{Symbol, Val},
 };
 
 /// An abstract syntax tree that can be converted into executable bytecode.
@@ -16,11 +16,17 @@ pub struct Ast {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AstKind {
     Const(Val),
-    Eval { func: Box<Ast>, args: Vec<Ast> },
-    Lookup(String),
+    Eval {
+        func: Box<Ast>,
+        args: Vec<Ast>,
+    },
+    Lookup(Symbol),
     Begin(Vec<Ast>),
     If(IfAst),
-    Lambda { body: Vec<Ast> },
+    Lambda {
+        parameters: Vec<Symbol>,
+        body: Vec<Ast>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +70,7 @@ impl TryFrom<&'_ SExpr> for Ast {
 
     fn try_from(expr: &SExpr) -> Result<Ast, AstBuilderError> {
         let kind = match &expr.kind {
-            SExprKind::Ident(ident) => AstKind::Lookup(ident.clone()),
+            SExprKind::Ident(ident) => AstKind::Lookup(Symbol::from(ident.as_str())),
             SExprKind::Const(val) => AstKind::Const(val.clone()),
             SExprKind::List(items) => AstKind::from_list(items, expr.span)?,
         };
@@ -138,17 +144,21 @@ impl AstKind {
                 span,
             });
         };
-        if !params.is_empty() {
-            return Err(AstBuilderError {
-                kind: AstBuilderErrorKind::NotImplemented("lambda parameters"),
-                span,
-            });
+        let mut parameters = Vec::new();
+        for param in params {
+            let SExprKind::Ident(name) = &param.kind else {
+                return Err(AstBuilderError {
+                    kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                    span: param.span,
+                });
+            };
+            parameters.push(Symbol::from(name.as_str()));
         }
         let body = body
             .iter()
             .map(|b| -> Result<Ast, AstBuilderError> { Ast::try_from(b) })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(AstKind::Lambda { body })
+        Ok(AstKind::Lambda { parameters, body })
     }
 }
 
@@ -414,12 +424,19 @@ mod tests {
     }
 
     #[test]
-    fn lambda_with_params_is_not_implemented() {
+    fn lambda_with_non_symbol_param_is_error() {
         assert_eq!(
-            Ast::parse("(lambda (x) x)"),
+            Ast::parse("(lambda (1) 1)"),
             Err(AstBuilderError {
-                kind: AstBuilderErrorKind::NotImplemented("lambda parameters"),
-                span: (0..14).into(),
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (9..10).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(lambda (x (y)) x)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidLambdaParameters,
+                span: (11..14).into(),
             })
         );
     }
@@ -429,7 +446,10 @@ mod tests {
         assert_eq!(
             Ast::parse("(lambda ())"),
             Ok(Ast {
-                kind: AstKind::Lambda { body: vec![] },
+                kind: AstKind::Lambda {
+                    parameters: vec![],
+                    body: vec![]
+                },
                 span: (0..11).into(),
             })
         );
@@ -437,6 +457,7 @@ mod tests {
             Ast::parse("(lambda () 1 2)"),
             Ok(Ast {
                 kind: AstKind::Lambda {
+                    parameters: vec![],
                     body: vec![
                         Ast {
                             kind: AstKind::Const(Val::Int(1)),

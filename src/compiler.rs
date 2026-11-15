@@ -1,18 +1,33 @@
 use crate::{
     ast::{Ast, AstKind, IfAst},
     val::{
-        Val,
+        Symbol, Val,
         function::{BytecodeFunction, Instruction},
     },
 };
 
 #[derive(Default)]
 pub struct Compiler {
+    parameters: Vec<Symbol>,
     instructions: Vec<Instruction>,
 }
 
 impl Compiler {
-    pub fn compile(mut self, ast: &Ast) -> Vec<Instruction> {
+    pub fn new(parameters: Vec<Symbol>) -> Compiler {
+        Compiler {
+            parameters,
+            instructions: Vec::new(),
+        }
+    }
+
+    fn into_bytecode(self) -> BytecodeFunction {
+        BytecodeFunction {
+            parameters: self.parameters,
+            instructions: self.instructions.into(),
+        }
+    }
+
+    pub fn compile_to_instructions(mut self, ast: &Ast) -> Vec<Instruction> {
         self.compile_one(ast, true);
         self.instructions
     }
@@ -35,14 +50,16 @@ impl Compiler {
                 }
             }
             AstKind::Lookup(ident) => {
-                self.push(Instruction::Lookup(ident.clone()));
+                self.compile_lookup(ident);
                 if tail_call {
                     self.push(Instruction::Return);
                 }
             }
             AstKind::Begin(exprs) => self.compile_begin(exprs.as_slice(), tail_call),
             AstKind::If(if_ast) => self.compile_if(if_ast, tail_call),
-            AstKind::Lambda { body } => self.compile_lambda(body, tail_call),
+            AstKind::Lambda { parameters, body } => {
+                self.compile_lambda(parameters.clone(), body, tail_call)
+            }
         }
     }
 
@@ -52,6 +69,15 @@ impl Compiler {
             self.compile_one(arg, false);
         }
         self.push(Instruction::Eval(args.len()));
+    }
+
+    fn compile_lookup(&mut self, ident: &Symbol) {
+        let param_position = self.parameters.iter().rposition(|param| param == ident);
+        let instruction = match param_position {
+            Some(idx) => Instruction::LookupLocal(idx),
+            None => Instruction::LookupGlobal(ident.clone()),
+        };
+        self.push(instruction);
     }
 
     fn compile_const(&mut self, val: Val, tail_call: bool) {
@@ -112,13 +138,37 @@ impl Compiler {
         }
     }
 
-    fn compile_lambda(&mut self, body: &[Ast], tail_call: bool) {
-        let mut sub_compiler = Compiler::default();
+    fn compile_lambda(&mut self, parameters: Vec<Symbol>, body: &[Ast], tail_call: bool) {
+        let mut sub_compiler = Compiler::new(parameters);
         sub_compiler.compile_begin(body, true);
-        let bytecode = BytecodeFunction {
-            instructions: sub_compiler.instructions.into(),
-        };
-        let lambda_val = Val::BytecodeFunction(bytecode);
+        let lambda_val = Val::BytecodeFunction(sub_compiler.into_bytecode());
         self.compile_const(lambda_val, tail_call);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_parameter_emits_lookup_local() {
+        let ast = Ast::parse("b").unwrap();
+        let instructions =
+            Compiler::new(vec!["a".into(), "b".into()]).compile_to_instructions(&ast);
+        assert_eq!(
+            instructions,
+            vec![Instruction::LookupLocal(1), Instruction::Return]
+        );
+    }
+
+    #[test]
+    fn lookup_non_parameter_emits_lookup_global() {
+        let ast = Ast::parse("+").unwrap();
+        let instructions =
+            Compiler::new(vec!["a".into(), "b".into()]).compile_to_instructions(&ast);
+        assert_eq!(
+            instructions,
+            vec![Instruction::LookupGlobal("+".into()), Instruction::Return]
+        );
     }
 }

@@ -4,7 +4,7 @@ use crate::{
     ast::Ast,
     builtins::PLUS_FN,
     compiler::Compiler,
-    val::{Val, VmError, function::Instruction},
+    val::{Symbol, Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
 pub mod ast;
@@ -21,7 +21,7 @@ pub mod val;
 
 #[derive(Default)]
 pub struct Vm {
-    globals: HashMap<String, Val>,
+    globals: HashMap<Symbol, Val>,
     stack: Vec<Val>,
 }
 
@@ -62,7 +62,7 @@ impl Vm {
 
     pub fn eval_str(&mut self, source: &str) -> Result<Val, VmError> {
         let ast = Ast::parse(source).unwrap();
-        let instructions = Compiler::default().compile(&ast).into();
+        let instructions = Compiler::default().compile_to_instructions(&ast).into();
         self.stack.clear();
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
@@ -86,8 +86,16 @@ impl Vm {
             call_frame.instruction_idx += 1;
             match instruction {
                 Instruction::PushConst(val) => self.stack.push(val.clone()),
-                Instruction::Lookup(sym) => {
+                Instruction::LookupGlobal(sym) => {
                     let val = self.globals.get(sym).unwrap();
+                    self.stack.push(val.clone());
+                }
+                Instruction::LookupLocal(idx) => {
+                    let absolute_idx = idx + call_frame.stack_start;
+                    let val = self
+                        .stack
+                        .get(absolute_idx)
+                        .ok_or(VmError::StackUnderflow)?;
                     self.stack.push(val.clone());
                 }
                 Instruction::Eval(n) => {
@@ -170,8 +178,8 @@ mod tests {
     fn lambda_is_called() {
         let mut vm = Vm::new();
         assert_eq!(
-            vm.eval_str("((lambda () (+ 1 2) (+ 1 2 3 4)))"),
-            Ok(Val::Int(10))
+            vm.eval_str("((lambda (a) (+ 1 2 a) (+ 1 2 3 4 a)) 10)"),
+            Ok(Val::Int(20))
         );
     }
 }

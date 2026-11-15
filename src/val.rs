@@ -24,7 +24,7 @@ impl Val {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Symbol(pub(crate) SmolStr);
 
 impl From<&str> for Symbol {
