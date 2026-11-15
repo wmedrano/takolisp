@@ -20,6 +20,10 @@ pub enum AstKind {
         func: Box<Ast>,
         args: Vec<Ast>,
     },
+    Define {
+        name: Symbol,
+        value: Box<Ast>,
+    },
     Lookup(Symbol),
     Begin(Vec<Ast>),
     If(IfAst),
@@ -91,6 +95,7 @@ impl AstKind {
             [first, rest @ ..] => {
                 if let SExprKind::Ident(ident) = &first.kind {
                     match ident.as_str() {
+                        "define" => return Self::parse_define(rest, span),
                         "if" => return Self::parse_if(rest, span),
                         "lambda" => return Self::parse_lambda(rest, span),
                         _ => {}
@@ -104,6 +109,28 @@ impl AstKind {
                 Ok(AstKind::Eval { func, args })
             }
         }
+    }
+
+    fn parse_define(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
+        let [name, value] = args else {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidArgCount {
+                    expected: "2",
+                    actual: args.len(),
+                },
+                span,
+            });
+        };
+        let SExprKind::Ident(ident) = &name.kind else {
+            return Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidDefineTarget,
+                span: name.span,
+            });
+        };
+        Ok(AstKind::Define {
+            name: Symbol::from(ident.as_str()),
+            value: Box::new(Ast::try_from(value)?),
+        })
     }
 
     fn parse_if(args: &[SExpr], span: Span) -> Result<AstKind, AstBuilderError> {
@@ -212,6 +239,7 @@ pub enum AstBuilderErrorKind {
         actual: usize,
     },
     InvalidLambdaParameters,
+    InvalidDefineTarget,
     NotImplemented(&'static str),
 }
 
@@ -499,6 +527,58 @@ mod tests {
                 kind: AstBuilderErrorKind::InvalidLambdaParameters,
                 span: (0..12).into(),
             }),
+        );
+    }
+
+    #[test]
+    fn define_parsed_as_define_node() {
+        assert_eq!(
+            Ast::parse("(define x 1)"),
+            Ok(Ast {
+                kind: AstKind::Define {
+                    name: "x".into(),
+                    value: Box::new(Ast {
+                        kind: AstKind::Const(Val::Int(1)),
+                        span: (10..11).into(),
+                    }),
+                },
+                span: (0..12).into(),
+            })
+        );
+    }
+
+    #[test]
+    fn define_wrong_arg_count_is_error() {
+        for (source, actual) in [("(define)", 0), ("(define x)", 1), ("(define x 1 2)", 3)] {
+            assert_eq!(
+                Ast::parse(source),
+                Err(AstBuilderError {
+                    kind: AstBuilderErrorKind::InvalidArgCount {
+                        expected: "2",
+                        actual,
+                    },
+                    span: (0..source.len()).into(),
+                }),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn define_non_symbol_target_is_error() {
+        assert_eq!(
+            Ast::parse("(define 1 2)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidDefineTarget,
+                span: (8..9).into(),
+            })
+        );
+        assert_eq!(
+            Ast::parse("(define (x) 1)"),
+            Err(AstBuilderError {
+                kind: AstBuilderErrorKind::InvalidDefineTarget,
+                span: (8..11).into(),
+            })
         );
     }
 }

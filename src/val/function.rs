@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::val::{Symbol, Val, VmError};
+use crate::{
+    ModuleId,
+    val::{Symbol, Val, VmError},
+};
 
 pub struct NativeFunction {
     func: fn(&[Val]) -> Result<Val, VmError>,
@@ -30,13 +33,21 @@ impl PartialEq for NativeFunction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BytecodeFunction {
+    pub(crate) module: ModuleId,
     pub(crate) parameters: Vec<Symbol>,
     pub(crate) instructions: Arc<[Instruction]>,
+}
+
+impl BytecodeFunction {
+    pub fn module(&self) -> &ModuleId {
+        &self.module
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     PushConst(Val),
+    Define(Symbol),
     LookupGlobal(Symbol),
     LookupLocal(usize),
     Eval(usize),
@@ -44,4 +55,22 @@ pub enum Instruction {
     Jump(usize),
     JumpIfNot(usize),
     Return,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noop(_: &[Val]) -> Result<Val, VmError> {
+        Ok(Val::Nil)
+    }
+
+    #[test]
+    fn native_functions_compare_equal_only_by_identity() {
+        static FN_A: NativeFunction = NativeFunction::new(noop);
+        static FN_B: NativeFunction = NativeFunction::new(noop);
+
+        assert_eq!(FN_A, FN_A);
+        assert_ne!(FN_A, FN_B);
+    }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     ast::Ast,
@@ -12,6 +12,8 @@ pub mod ast;
 mod builtins;
 /// Compile Ast into bytecode.
 pub mod compiler;
+/// Module identity and global symbol storage.
+pub mod module;
 /// Parse text into datastructures.
 pub mod reader;
 /// Tokenize text into stream of Lisp tokens.
@@ -19,66 +21,11 @@ mod tokenizer;
 /// Defines the value type that can hold an object of any type.
 pub mod val;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ModuleId {
-    Internal(Symbol),
-    File(PathBuf),
-}
-
-impl ModuleId {
-    pub fn internal(name: impl Into<Symbol>) -> Self {
-        Self::Internal(name.into())
-    }
-
-    pub fn file(path: impl Into<PathBuf>) -> Self {
-        Self::File(path.into())
-    }
-}
-
-impl Default for ModuleId {
-    fn default() -> Self {
-        Self::Internal("user".into())
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Module {
-    id: ModuleId,
-    globals: HashMap<Symbol, Val>,
-}
-
-impl Module {
-    pub fn new(id: ModuleId) -> Self {
-        Self {
-            id,
-            globals: HashMap::new(),
-        }
-    }
-
-    pub fn internal(name: impl Into<Symbol>) -> Self {
-        Self::new(ModuleId::internal(name))
-    }
-
-    pub fn from_file(path: impl Into<PathBuf>) -> Self {
-        Self::new(ModuleId::file(path))
-    }
-
-    pub fn id(&self) -> &ModuleId {
-        &self.id
-    }
-
-    pub fn get(&self, symbol: &Symbol) -> Option<&Val> {
-        self.globals.get(symbol)
-    }
-
-    pub fn insert(&mut self, symbol: impl Into<Symbol>, val: Val) -> Option<Val> {
-        self.globals.insert(symbol.into(), val)
-    }
-}
+pub use module::{Module, ModuleId};
 
 #[derive(Default)]
 pub struct Vm {
-    module: Module,
+    modules: HashMap<ModuleId, Module>,
     stack: Vec<Val>,
 }
 
@@ -91,6 +38,7 @@ enum ReturnAddress {
 #[derive(Debug)]
 struct CallFrame {
     return_address: ReturnAddress,
+    module: ModuleId,
     instructions: Arc<[Instruction]>,
     instruction_idx: usize,
     stack_start: usize,
@@ -99,8 +47,28 @@ struct CallFrame {
 impl Vm {
     pub fn new() -> Vm {
         let mut vm = Vm::default();
-        vm.module.insert("+", Val::NativeFunction(&PLUS_FN));
+        let mut global_module = Module::new(ModuleId::GLOBAL);
+        global_module.insert("+", Val::NativeFunction(&PLUS_FN));
+        vm.modules.insert(ModuleId::GLOBAL, global_module);
+        vm.module_or_init(&ModuleId::USER);
         vm
+    }
+
+    pub fn module(&self, id: &ModuleId) -> Option<&Module> {
+        self.modules.get(id)
+    }
+
+    fn module_or_init(&mut self, id: &ModuleId) -> &mut Module {
+        self.modules
+            .entry(id.clone())
+            .or_insert_with(|| Module::new(id.clone()))
+    }
+
+    fn lookup(&self, module: &ModuleId, sym: &Symbol) -> Option<&Val> {
+        self.modules
+            .get(module)
+            .and_then(|m| m.get(sym))
+            .or_else(|| self.modules.get(&ModuleId::GLOBAL).and_then(|m| m.get(sym)))
     }
 
     pub fn eval(&mut self, func: Val, args: impl IntoIterator<Item = Val>) -> Result<Val, VmError> {
@@ -110,6 +78,7 @@ impl Vm {
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
             return_address: ReturnAddress::Exit,
+            module: ModuleId::USER,
             instructions: [Instruction::Eval(arg_count)].into(),
             instruction_idx: 0,
             stack_start: 0,
@@ -118,12 +87,20 @@ impl Vm {
     }
 
     pub fn eval_str(&mut self, source: &str) -> Result<Val, VmError> {
+        self.eval_str_in(ModuleId::internal("user"), source)
+    }
+
+    pub fn eval_str_in(&mut self, module: ModuleId, source: &str) -> Result<Val, VmError> {
+        self.module_or_init(&module);
         let ast = Ast::parse(source).unwrap();
-        let instructions = Compiler::default().compile_to_instructions(&ast).into();
+        let instructions = Compiler::for_module(module.clone())
+            .compile_to_instructions(&ast)
+            .into();
         self.stack.clear();
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
             return_address: ReturnAddress::Exit,
+            module,
             instructions,
             instruction_idx: 0,
             stack_start: 0,
@@ -143,9 +120,16 @@ impl Vm {
             call_frame.instruction_idx += 1;
             match instruction {
                 Instruction::PushConst(val) => self.stack.push(val.clone()),
+                Instruction::Define(sym) => {
+                    let val = std::mem::take(self.stack.last_mut().ok_or(VmError::StackUnderflow)?);
+                    self.modules
+                        .get_mut(&call_frame.module)
+                        .ok_or_else(|| VmError::ModuleNotFound(call_frame.module.clone()))?
+                        .insert(sym.clone(), val);
+                }
                 Instruction::LookupGlobal(sym) => {
-                    let val = self.module.get(sym).unwrap();
-                    self.stack.push(val.clone());
+                    let val = self.lookup(&call_frame.module, sym).unwrap().clone();
+                    self.stack.push(val);
                 }
                 Instruction::LookupLocal(idx) => {
                     let absolute_idx = idx + call_frame.stack_start;
@@ -202,10 +186,11 @@ impl Vm {
             }
             Val::BytecodeFunction(bytecode_function) => {
                 let call_frame = CallFrame {
+                    return_address: ReturnAddress::Stack(func_idx),
+                    module: bytecode_function.module,
                     instructions: bytecode_function.instructions,
                     instruction_idx: 0,
                     stack_start,
-                    return_address: ReturnAddress::Stack(func_idx),
                 };
                 call_frames.push(call_frame);
                 call_frames.last_mut().ok_or(VmError::StackUnderflow)
@@ -241,27 +226,240 @@ mod tests {
     }
 
     #[test]
-    fn module_stores_and_looks_up_globals() {
-        let mut module = Module::default();
-        assert_eq!(module.get(&Symbol::from("x")), None);
-        assert_eq!(module.insert("x", Val::Int(42)), None);
-        assert_eq!(module.get(&Symbol::from("x")), Some(&Val::Int(42)));
-        assert_eq!(module.insert("x", Val::Int(99)), Some(Val::Int(42)));
-        assert_eq!(module.get(&Symbol::from("x")), Some(&Val::Int(99)));
+    fn evaluating_native_function_directly_returns_result() {
+        let mut vm = Vm::new();
+        let result = vm.eval(
+            Val::NativeFunction(&PLUS_FN),
+            [Val::Int(2), Val::Int(3), Val::Int(4)],
+        );
+        assert_eq!(result, Ok(Val::Int(9)));
     }
 
     #[test]
-    fn module_tracks_internal_and_file_identity() {
-        let default_mod = Module::default();
-        assert_eq!(default_mod.id(), &ModuleId::internal("user"));
+    fn evaluating_bytecode_function_directly_binds_args_and_returns_result() {
+        let mut vm = Vm::new();
+        let func = vm.eval_str("(lambda (a b) (+ a b))").unwrap();
+        assert_eq!(vm.eval(func, [Val::Int(5), Val::Int(7)]), Ok(Val::Int(12)));
+    }
 
-        let core_mod = Module::internal("core");
-        assert_eq!(core_mod.id(), &ModuleId::Internal("core".into()));
-
-        let file_mod = Module::from_file("examples/hello.tl");
+    #[test]
+    fn evaluating_non_callable_value_returns_not_callable_error() {
+        let mut vm = Vm::new();
         assert_eq!(
-            file_mod.id(),
-            &ModuleId::File(PathBuf::from("examples/hello.tl"))
+            vm.eval(Val::Int(42), []),
+            Err(VmError::NotCallable(Val::Int(42)))
         );
+        assert_eq!(vm.eval_str("(1 2)"), Err(VmError::NotCallable(Val::Int(1))));
+    }
+
+    #[test]
+    fn if_without_else_returns_nil_when_predicate_is_false() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(if #false 1)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn if_treats_non_false_values_as_truthy() {
+        let mut vm = Vm::new();
+        for pred in ["#true", "0", "\"\"", "(if #false 1)"] {
+            assert_eq!(
+                vm.eval_str(&format!("(if {pred} 1 2)")),
+                Ok(Val::Int(1)),
+                "predicate {pred} should be truthy"
+            );
+        }
+    }
+
+    #[test]
+    fn if_skips_evaluating_untaken_branch() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(if #true 1 (1))"), Ok(Val::Int(1)));
+        assert_eq!(vm.eval_str("(if #false (1) 2)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn lambda_with_multiple_parameters_binds_positional_arguments() {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval_str("((lambda (a b c) (+ a b)) 10 20 30)"),
+            Ok(Val::Int(30))
+        );
+    }
+
+    #[test]
+    fn lambda_with_duplicate_parameter_uses_last_argument() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("((lambda (a a) a) 1 2)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn nested_calls_preserve_caller_locals() {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval_str("((lambda (x) (+ x ((lambda (y) (+ y 1)) 10) x)) 5)"),
+            Ok(Val::Int(21))
+        );
+    }
+
+    #[test]
+    fn sequential_evaluations_isolate_vm_stack() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(+ 1 2)"), Ok(Val::Int(3)));
+        assert_eq!(vm.eval_str("(+ 4 5)"), Ok(Val::Int(9)));
+    }
+
+    #[test]
+    fn define_sets_global_and_returns_nil() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(define x 42)"), Ok(Val::Nil));
+        assert_eq!(vm.eval_str("x"), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn define_followed_by_expression_uses_defined_value() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(define x 10) (+ x 5)"), Ok(Val::Int(15)));
+    }
+
+    #[test]
+    fn eval_str_defaults_to_user_internal_module() {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval_str("(define x 42)"), Ok(Val::Nil));
+        let user_module = vm.module(&ModuleId::internal("user")).unwrap();
+        assert_eq!(user_module.get(&Symbol::from("x")), Some(&Val::Int(42)));
+    }
+
+    #[test]
+    fn eval_str_in_isolates_definitions_per_module() {
+        let mut vm = Vm::new();
+        let mod_a = ModuleId::internal("mod_a");
+        let mod_b = ModuleId::file("examples/mod_b.tl");
+
+        assert_eq!(vm.eval_str_in(mod_a.clone(), "(define x 10)"), Ok(Val::Nil));
+        assert_eq!(vm.eval_str_in(mod_b.clone(), "(define x 20)"), Ok(Val::Nil));
+
+        assert_eq!(vm.eval_str_in(mod_a.clone(), "(+ x 1)"), Ok(Val::Int(11)));
+        assert_eq!(vm.eval_str_in(mod_b.clone(), "(+ x 1)"), Ok(Val::Int(21)));
+        assert_eq!(
+            vm.module(&ModuleId::internal("user"))
+                .unwrap()
+                .get(&Symbol::from("x")),
+            None
+        );
+    }
+
+    #[test]
+    fn bytecode_function_records_originating_module() {
+        let mut vm = Vm::new();
+        let Val::BytecodeFunction(user_fn) = vm.eval_str("(lambda (x) x)").unwrap() else {
+            panic!("expected bytecode function");
+        };
+        assert_eq!(user_fn.module(), &ModuleId::internal("user"));
+
+        let custom_mod = ModuleId::file("lib/math.tl");
+        let Val::BytecodeFunction(custom_fn) = vm
+            .eval_str_in(custom_mod.clone(), "(lambda (x) x)")
+            .unwrap()
+        else {
+            panic!("expected bytecode function");
+        };
+        assert_eq!(custom_fn.module(), &custom_mod);
+    }
+
+    #[test]
+    fn bytecode_function_defines_and_looks_up_in_its_own_module() {
+        let mut vm = Vm::new();
+        let math_mod = ModuleId::internal("math");
+
+        vm.eval_str_in(math_mod.clone(), "(define base 100)")
+            .unwrap();
+        let setter_and_adder = vm
+            .eval_str_in(
+                math_mod.clone(),
+                "(lambda (v) (define saved (+ base v)) saved)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            vm.eval(setter_and_adder.clone(), [Val::Int(23)]),
+            Ok(Val::Int(123))
+        );
+        assert_eq!(
+            vm.module(&math_mod).unwrap().get(&Symbol::from("saved")),
+            Some(&Val::Int(123))
+        );
+        assert_eq!(
+            vm.module(&ModuleId::internal("user"))
+                .unwrap()
+                .get(&Symbol::from("saved")),
+            None
+        );
+
+        // Also verify calling from another module preserves both modules' scopes.
+        vm.module_or_init(&ModuleId::internal("user"))
+            .insert("run-math", setter_and_adder);
+        assert_eq!(
+            vm.eval_str("(define base 1) (define after (run-math 5)) (+ base after)"),
+            Ok(Val::Int(106))
+        );
+        assert_eq!(
+            vm.module(&math_mod).unwrap().get(&Symbol::from("saved")),
+            Some(&Val::Int(105))
+        );
+        assert_eq!(
+            vm.module(&ModuleId::internal("user"))
+                .unwrap()
+                .get(&Symbol::from("after")),
+            Some(&Val::Int(105))
+        );
+    }
+
+    #[test]
+    fn lookup_falls_back_to_global_module_and_allows_module_shadowing() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            vm.module(&ModuleId::GLOBAL)
+                .unwrap()
+                .get(&Symbol::from("+")),
+            Some(Val::NativeFunction(_))
+        ));
+        assert_eq!(
+            vm.module(&ModuleId::internal("user"))
+                .unwrap()
+                .get(&Symbol::from("+")),
+            None
+        );
+
+        vm.eval_str_in(ModuleId::GLOBAL, "(define shared 7)")
+            .unwrap();
+        assert_eq!(vm.eval_str("(+ shared 3)"), Ok(Val::Int(10)));
+
+        let custom_mod = ModuleId::internal("custom");
+        assert_eq!(
+            vm.eval_str_in(custom_mod.clone(), "(define shared 100) (+ shared 3)"),
+            Ok(Val::Int(103))
+        );
+        assert_eq!(vm.eval_str("shared"), Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn define_in_missing_module_returns_module_not_found_error() {
+        use crate::val::function::BytecodeFunction;
+
+        let mut vm = Vm::new();
+        let missing_mod = ModuleId::internal("missing");
+        let func = Val::BytecodeFunction(BytecodeFunction {
+            module: missing_mod.clone(),
+            parameters: vec![],
+            instructions: [
+                Instruction::PushConst(Val::Int(42)),
+                Instruction::Define(Symbol::from("x")),
+                Instruction::PushConst(Val::Nil),
+                Instruction::Return,
+            ]
+            .into(),
+        });
+
+        assert_eq!(vm.eval(func, []), Err(VmError::ModuleNotFound(missing_mod)));
     }
 }

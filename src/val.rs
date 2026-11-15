@@ -5,8 +5,9 @@ pub mod function;
 use function::{BytecodeFunction, NativeFunction};
 
 /// Contains a value from the Vm.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Val {
+    #[default]
     Nil,
     Bool(bool),
     Int(i64),
@@ -40,4 +41,26 @@ pub enum VmError {
     StackOverflow,
     NotCallable(Val),
     InvalidType { expected: &'static str, actual: Val },
+    ModuleNotFound(crate::ModuleId),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn false_bool_is_falsey() {
+        assert!(Val::Bool(false).is_falsey());
+    }
+
+    #[test]
+    fn non_false_values_are_not_falsey() {
+        assert!(!Val::Bool(true).is_falsey());
+        assert!(!Val::Nil.is_falsey());
+        assert!(!Val::Int(0).is_falsey());
+        assert!(!Val::Float(0.0).is_falsey());
+        assert!(!Val::String(String::new()).is_falsey());
+        assert!(!Val::Symbol("false".into()).is_falsey());
+        assert!(!Val::List(vec![]).is_falsey());
+    }
 }
