@@ -4,6 +4,7 @@ use crate::{
     ast::{Ast, AstBuilderError},
     builtins::PLUS_FN,
     compiler::{Compiler, CompilerError},
+    module::LoadState,
     val::{IoError, Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
@@ -57,13 +58,21 @@ pub struct Vm {
 #[derive(Copy, Clone, Debug)]
 enum ReturnAddress {
     Stack(usize),
+    Discard,
     Exit,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FrameKind {
+    Normal,
+    ModuleImport,
 }
 
 #[derive(Debug)]
 struct CallFrame {
+    kind: FrameKind,
     return_address: ReturnAddress,
-    module: ModuleId,
+    module_id: ModuleId,
     instructions: Arc<[Instruction]>,
     instruction_idx: usize,
     stack_start: usize,
@@ -95,8 +104,9 @@ impl Vm {
         let arg_count = self.stack.len() - 1;
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
+            kind: FrameKind::Normal,
             return_address: ReturnAddress::Exit,
-            module: ModuleId::USER,
+            module_id: ModuleId::USER,
             instructions: [Instruction::Eval(arg_count)].into(),
             instruction_idx: 0,
             stack_start: 0,
@@ -114,30 +124,48 @@ impl Vm {
 
     pub fn load_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<Val, VmError> {
         let path = path.as_ref();
+        let module_id = ModuleId::file(path);
         let source = read_file_to_string(path)?;
-        self.eval_source_in(ModuleId::file(path), &source, true)
+        self.module_or_init(&module_id)
+            .set_load_state(LoadState::Loading);
+        let eval_res = self.eval_source_in(module_id.clone(), &source, true);
+        if eval_res.is_err() {
+            self.module_or_init(&module_id)
+                .set_load_state(LoadState::Unloaded);
+        }
+        eval_res
     }
 
-    fn eval_source_in(
+    fn compile_source_in(
         &mut self,
-        module: ModuleId,
+        module_id: ModuleId,
         source: &str,
         as_module: bool,
-    ) -> Result<Val, VmError> {
-        self.module_or_init(&module);
-        let ast = Ast::parse_in(module.clone(), source)?;
-        let compiler = Compiler::for_module(module.clone(), &mut self.modules);
+    ) -> Result<Arc<[Instruction]>, VmError> {
+        self.module_or_init(&module_id);
+        let ast = Ast::parse_in(module_id.clone(), source)?;
+        let compiler = Compiler::for_module(module_id, &mut self.modules);
         let instructions = if as_module {
             compiler.compile_module(&ast)?
         } else {
             compiler.compile_to_instructions(&ast)?
-        }
-        .into();
+        };
+        Ok(instructions.into())
+    }
+
+    fn eval_source_in(
+        &mut self,
+        module_id: ModuleId,
+        source: &str,
+        as_module: bool,
+    ) -> Result<Val, VmError> {
+        let instructions = self.compile_source_in(module_id.clone(), source, as_module)?;
         self.stack.clear();
         let mut call_frames = Vec::with_capacity(64);
         call_frames.push(CallFrame {
+            kind: FrameKind::Normal,
             return_address: ReturnAddress::Exit,
-            module,
+            module_id,
             instructions,
             instruction_idx: 0,
             stack_start: 0,
@@ -146,6 +174,26 @@ impl Vm {
     }
 
     fn run(&mut self, call_frames: &mut Vec<CallFrame>) -> Result<Val, VmError> {
+        let res = self.run_loop(call_frames);
+        if let Err(mut err) = res {
+            for frame in call_frames.drain(..).rev() {
+                if frame.kind == FrameKind::ModuleImport {
+                    self.module_or_init(&frame.module_id)
+                        .set_load_state(LoadState::Unloaded);
+                    if let ModuleId::File(path) = frame.module_id {
+                        err = VmError::ModuleLoadError {
+                            path,
+                            error: Box::new(err),
+                        };
+                    }
+                }
+            }
+            return Err(err);
+        }
+        res
+    }
+
+    fn run_loop(&mut self, call_frames: &mut Vec<CallFrame>) -> Result<Val, VmError> {
         let Some(mut call_frame) = call_frames.last_mut() else {
             return Err(VmError::StackUnderflow);
         };
@@ -160,8 +208,8 @@ impl Vm {
                 Instruction::Define(sym) => {
                     let val = std::mem::take(self.stack.last_mut().ok_or(VmError::StackUnderflow)?);
                     self.modules
-                        .get_mut(&call_frame.module)
-                        .ok_or_else(|| VmError::ModuleNotFound(call_frame.module.clone()))?
+                        .get_mut(&call_frame.module_id)
+                        .ok_or_else(|| VmError::ModuleNotFound(call_frame.module_id.clone()))?
                         .insert(sym.clone(), val);
                 }
                 Instruction::Lookup(module, sym) => {
@@ -206,37 +254,50 @@ impl Vm {
                     self.modules
                         .get_mut(module)
                         .ok_or_else(|| VmError::ModuleNotFound(module.clone()))?
-                        .set_loaded(true);
+                        .set_load_state(LoadState::Loaded);
                 }
                 Instruction::EnsureLoaded(module_id) => {
-                    // TODO(wmedrano): Handle circular imports
-                    let ModuleId::File(path) = module_id else {
+                    let module_id = module_id.clone();
+                    let ModuleId::File(ref path) = module_id else {
                         continue;
                     };
-                    if let Some(m) = self.module(module_id)
-                        && m.is_loaded()
-                    {
-                        continue;
-                    }
-                    let source = read_file_to_string(path).map_err(|err| {
-                        VmError::ModuleLoadError {
-                            path: path.clone(),
-                            error: Box::new(err.into()),
+                    if let Some(m) = self.module(&module_id) {
+                        match m.load_state() {
+                            LoadState::Loaded => continue,
+                            LoadState::Loading => {
+                                return Err(VmError::ModuleLoadError {
+                                    path: path.clone(),
+                                    error: Box::new(VmError::CircularImport(path.clone())),
+                                });
+                            }
+                            LoadState::Unloaded => {}
                         }
-                    })?;
-                    let backup_stack = std::mem::take(&mut self.stack);
-                    let eval_res = self.eval_source_in(module_id.clone(), &source, true);
-                    self.stack = backup_stack;
-                    eval_res.map_err(|err| VmError::ModuleLoadError {
-                        path: path.clone(),
-                        error: Box::new(err),
-                    })?;
+                    }
+                    let instructions = read_file_to_string(path)
+                        .map_err(VmError::from)
+                        .and_then(|source| self.compile_source_in(module_id.clone(), &source, true))
+                        .map_err(|err| VmError::ModuleLoadError {
+                            path: path.clone(),
+                            error: Box::new(err),
+                        })?;
+                    self.module_or_init(&module_id)
+                        .set_load_state(LoadState::Loading);
+                    call_frames.push(CallFrame {
+                        kind: FrameKind::ModuleImport,
+                        return_address: ReturnAddress::Discard,
+                        module_id,
+                        instructions,
+                        instruction_idx: 0,
+                        stack_start: self.stack.len(),
+                    });
+                    call_frame = call_frames.last_mut().ok_or(VmError::StackUnderflow)?;
                 }
                 Instruction::Return => {
                     let return_val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                     let returning_frame = call_frames.pop().ok_or(VmError::StackUnderflow)?;
                     match returning_frame.return_address {
                         ReturnAddress::Stack(idx) => self.stack[idx] = return_val,
+                        ReturnAddress::Discard => {}
                         ReturnAddress::Exit => return Ok(return_val),
                     }
                     self.stack.truncate(returning_frame.stack_start);
@@ -264,8 +325,9 @@ impl Vm {
             }
             Val::BytecodeFunction(bytecode_function) => {
                 let call_frame = CallFrame {
+                    kind: FrameKind::Normal,
                     return_address: ReturnAddress::Stack(func_idx),
-                    module: bytecode_function.module,
+                    module_id: bytecode_function.module,
                     instructions: bytecode_function.instructions,
                     instruction_idx: 0,
                     stack_start,
@@ -571,7 +633,10 @@ mod tests {
             vm.eval_str_in(math_mod.clone(), "(define inc (lambda (x) (+ x 1)))"),
             Ok(Val::Nil)
         );
-        vm.modules.get_mut(&math_mod).unwrap().set_loaded(true);
+        vm.modules
+            .get_mut(&math_mod)
+            .unwrap()
+            .set_load_state(LoadState::Loaded);
 
         assert_eq!(
             vm.eval_str(r#"(import "lib/math.tl" as m) (m.inc 41)"#),
@@ -746,5 +811,94 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(result, Ok(Val::Int(42)));
         assert!(vm.module(&ModuleId::file(&path)).unwrap().is_loaded());
+    }
+
+    #[test]
+    fn direct_self_import_returns_circular_import_error() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_self_import_test_{}.tl",
+            std::process::id()
+        ));
+        let escaped_path = path.to_string_lossy().replace('\\', "\\\\");
+        std::fs::write(&path, format!(r#"(import "{escaped_path}" as self_mod)"#)).unwrap();
+
+        let mut vm = Vm::new();
+        let result = vm.load_file(&path);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result,
+            Err(VmError::ModuleLoadError {
+                path: path.clone(),
+                error: Box::new(VmError::CircularImport(path.clone())),
+            })
+        );
+        assert_eq!(
+            vm.module(&ModuleId::file(&path)).unwrap().load_state(),
+            LoadState::Unloaded
+        );
+    }
+
+    #[test]
+    fn mutual_circular_import_returns_circular_import_error() {
+        let pid = std::process::id();
+        let mut path_a = std::env::temp_dir();
+        path_a.push(format!("takolisp_mutual_a_{pid}.tl"));
+        let mut path_b = std::env::temp_dir();
+        path_b.push(format!("takolisp_mutual_b_{pid}.tl"));
+
+        let escaped_a = path_a.to_string_lossy().replace('\\', "\\\\");
+        let escaped_b = path_b.to_string_lossy().replace('\\', "\\\\");
+        std::fs::write(&path_a, format!(r#"(import "{escaped_b}" as b)"#)).unwrap();
+        std::fs::write(&path_b, format!(r#"(import "{escaped_a}" as a)"#)).unwrap();
+
+        let mut vm = Vm::new();
+        let result = vm.eval_str(&format!(r#"(import "{escaped_a}" as a)"#));
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+        assert_eq!(
+            result,
+            Err(VmError::ModuleLoadError {
+                path: path_a.clone(),
+                error: Box::new(VmError::ModuleLoadError {
+                    path: path_b.clone(),
+                    error: Box::new(VmError::ModuleLoadError {
+                        path: path_a.clone(),
+                        error: Box::new(VmError::CircularImport(path_a.clone())),
+                    }),
+                }),
+            })
+        );
+        assert_eq!(
+            vm.module(&ModuleId::file(&path_a)).unwrap().load_state(),
+            LoadState::Unloaded
+        );
+        assert_eq!(
+            vm.module(&ModuleId::file(&path_b)).unwrap().load_state(),
+            LoadState::Unloaded
+        );
+    }
+
+    #[test]
+    fn failed_import_resets_load_state_to_unloaded() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_failed_import_test_{}.tl",
+            std::process::id()
+        ));
+        std::fs::write(&path, "(unknown_symbol)").unwrap();
+
+        let mut vm = Vm::new();
+        let escaped_path = path.to_string_lossy().replace('\\', "\\\\");
+        let result = vm.eval_str(&format!(r#"(import "{escaped_path}" as bad)"#));
+
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(VmError::ModuleLoadError { .. })));
+        assert_eq!(
+            vm.module(&ModuleId::file(&path)).unwrap().load_state(),
+            LoadState::Unloaded
+        );
     }
 }

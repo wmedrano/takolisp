@@ -49,20 +49,30 @@ fn normalize_path(path: &Path) -> PathBuf {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadState {
+    Unloaded,
+    Loading,
+    Loaded,
+}
+
 #[derive(Clone, Debug)]
 pub struct Module {
     id: ModuleId,
-    loaded: bool,
+    load_state: LoadState,
     globals: HashMap<Symbol, Val>,
     imports: HashMap<Symbol, ModuleId>,
 }
 
 impl Module {
     pub fn new(id: ModuleId) -> Self {
-        let loaded = matches!(id, ModuleId::Internal(_));
+        let load_state = match id {
+            ModuleId::Internal(_) => LoadState::Loaded,
+            ModuleId::File(_) => LoadState::Unloaded,
+        };
         Self {
             id,
-            loaded,
+            load_state,
             globals: HashMap::new(),
             imports: HashMap::new(),
         }
@@ -80,12 +90,16 @@ impl Module {
         &self.id
     }
 
-    pub fn is_loaded(&self) -> bool {
-        self.loaded
+    pub fn load_state(&self) -> LoadState {
+        self.load_state
     }
 
-    pub(crate) fn set_loaded(&mut self, loaded: bool) {
-        self.loaded = loaded;
+    pub fn is_loaded(&self) -> bool {
+        self.load_state == LoadState::Loaded
+    }
+
+    pub(crate) fn set_load_state(&mut self, load_state: LoadState) {
+        self.load_state = load_state;
     }
 
     pub fn get(&self, symbol: &Symbol) -> Option<&Val> {
@@ -177,18 +191,27 @@ mod tests {
     #[test]
     fn module_tracks_loaded_state_with_expected_defaults() {
         let user_mod = Module::new(ModuleId::USER);
+        assert_eq!(user_mod.load_state(), LoadState::Loaded);
         assert!(user_mod.is_loaded());
 
         let internal_mod = Module::internal("core");
+        assert_eq!(internal_mod.load_state(), LoadState::Loaded);
         assert!(internal_mod.is_loaded());
 
         let mut file_mod = Module::from_file("examples/hello.tl");
+        assert_eq!(file_mod.load_state(), LoadState::Unloaded);
         assert!(!file_mod.is_loaded());
 
-        file_mod.set_loaded(true);
+        file_mod.set_load_state(LoadState::Loading);
+        assert_eq!(file_mod.load_state(), LoadState::Loading);
+        assert!(!file_mod.is_loaded());
+
+        file_mod.set_load_state(LoadState::Loaded);
+        assert_eq!(file_mod.load_state(), LoadState::Loaded);
         assert!(file_mod.is_loaded());
 
-        file_mod.set_loaded(false);
+        file_mod.set_load_state(LoadState::Unloaded);
+        assert_eq!(file_mod.load_state(), LoadState::Unloaded);
         assert!(!file_mod.is_loaded());
     }
 }

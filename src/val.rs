@@ -69,6 +69,7 @@ pub enum VmError {
     },
     ParseError(crate::ast::AstBuilderError),
     IoError(IoError),
+    CircularImport(std::path::PathBuf),
     ModuleLoadError {
         path: std::path::PathBuf,
         error: Box<VmError>,
