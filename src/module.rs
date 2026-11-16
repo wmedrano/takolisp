@@ -84,7 +84,7 @@ impl Module {
         self.loaded
     }
 
-    pub fn set_loaded(&mut self, loaded: bool) {
+    pub(crate) fn set_loaded(&mut self, loaded: bool) {
         self.loaded = loaded;
     }
 
@@ -167,10 +167,7 @@ mod tests {
         assert_eq!(module.imports().get(&Symbol::from("math")), Some(&math_mod));
 
         let file_math_mod = ModuleId::file("lib/math.tl");
-        assert_eq!(
-            module.import("math", file_math_mod.clone()),
-            Some(math_mod)
-        );
+        assert_eq!(module.import("math", file_math_mod.clone()), Some(math_mod));
         assert_eq!(
             module.get_import(&Symbol::from("math")),
             Some(&file_math_mod)

@@ -36,6 +36,21 @@ impl From<&str> for Symbol {
 }
 
 #[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IoError {
+    ReadFile {
+        path: std::path::PathBuf,
+        kind: std::io::ErrorKind,
+    },
+}
+
+impl From<IoError> for VmError {
+    fn from(err: IoError) -> Self {
+        VmError::IoError(err)
+    }
+}
+
+#[non_exhaustive]
 #[derive(Debug, PartialEq)]
 pub enum VmError {
     StackUnderflow,
@@ -53,9 +68,10 @@ pub enum VmError {
         name: Symbol,
     },
     ParseError(crate::ast::AstBuilderError),
-    IoError {
+    IoError(IoError),
+    ModuleLoadError {
         path: std::path::PathBuf,
-        kind: std::io::ErrorKind,
+        error: Box<VmError>,
     },
 }
 

@@ -4,7 +4,7 @@ use crate::{
     ast::{Ast, AstBuilderError},
     builtins::PLUS_FN,
     compiler::{Compiler, CompilerError},
-    val::{Val, VmError, function::Instruction},
+    val::{IoError, Val, VmError, function::Instruction},
 };
 /// Parse text into AST (abstract syntax tree).
 pub mod ast;
@@ -39,6 +39,13 @@ impl From<CompilerError> for VmError {
             CompilerError::ImportNotAtTopLevel => VmError::ImportNotAtTopLevel,
         }
     }
+}
+
+fn read_file_to_string(path: &std::path::Path) -> Result<String, IoError> {
+    std::fs::read_to_string(path).map_err(|err| IoError::ReadFile {
+        path: path.to_path_buf(),
+        kind: err.kind(),
+    })
 }
 
 #[derive(Default)]
@@ -107,10 +114,7 @@ impl Vm {
 
     pub fn load_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<Val, VmError> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path).map_err(|err| VmError::IoError {
-            path: path.to_path_buf(),
-            kind: err.kind(),
-        })?;
+        let source = read_file_to_string(path)?;
         self.eval_source_in(ModuleId::file(path), &source, true)
     }
 
@@ -203,6 +207,30 @@ impl Vm {
                         .get_mut(module)
                         .ok_or_else(|| VmError::ModuleNotFound(module.clone()))?
                         .set_loaded(true);
+                }
+                Instruction::EnsureLoaded(module_id) => {
+                    // TODO(wmedrano): Handle circular imports
+                    let ModuleId::File(path) = module_id else {
+                        continue;
+                    };
+                    if let Some(m) = self.module(module_id)
+                        && m.is_loaded()
+                    {
+                        continue;
+                    }
+                    let source = read_file_to_string(path).map_err(|err| {
+                        VmError::ModuleLoadError {
+                            path: path.clone(),
+                            error: Box::new(err.into()),
+                        }
+                    })?;
+                    let backup_stack = std::mem::take(&mut self.stack);
+                    let eval_res = self.eval_source_in(module_id.clone(), &source, true);
+                    self.stack = backup_stack;
+                    eval_res.map_err(|err| VmError::ModuleLoadError {
+                        path: path.clone(),
+                        error: Box::new(err),
+                    })?;
                 }
                 Instruction::Return => {
                     let return_val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -540,9 +568,10 @@ mod tests {
         let mut vm = Vm::new();
         let math_mod = ModuleId::file("lib/math.tl");
         assert_eq!(
-            vm.eval_str_in(math_mod, "(define inc (lambda (x) (+ x 1)))"),
+            vm.eval_str_in(math_mod.clone(), "(define inc (lambda (x) (+ x 1)))"),
             Ok(Val::Nil)
         );
+        vm.modules.get_mut(&math_mod).unwrap().set_loaded(true);
 
         assert_eq!(
             vm.eval_str(r#"(import "lib/math.tl" as m) (m.inc 41)"#),
@@ -554,7 +583,10 @@ mod tests {
     fn eval_str_returns_parse_error_instead_of_panicking() {
         let mut vm = Vm::new();
         assert!(matches!(vm.eval_str(".foo"), Err(VmError::ParseError(_))));
-        assert!(matches!(vm.eval_str("(import)"), Err(VmError::ParseError(_))));
+        assert!(matches!(
+            vm.eval_str("(import)"),
+            Err(VmError::ParseError(_))
+        ));
     }
 
     #[test]
@@ -632,10 +664,7 @@ mod tests {
     #[test]
     fn load_file_evaluates_file_and_marks_module_loaded() {
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "takolisp_load_file_test_{}.tl",
-            std::process::id()
-        ));
+        path.push(format!("takolisp_load_file_test_{}.tl", std::process::id()));
         std::fs::write(&path, "(define answer 42) (if #true answer 0)").unwrap();
 
         let mut vm = Vm::new();
@@ -661,10 +690,61 @@ mod tests {
         let mut vm = Vm::new();
         assert_eq!(
             vm.load_file(&path),
-            Err(VmError::IoError {
+            Err(VmError::IoError(IoError::ReadFile {
                 path,
                 kind: std::io::ErrorKind::NotFound,
+            }))
+        );
+    }
+
+    #[test]
+    fn ensure_loaded_missing_file_returns_io_error() {
+        use crate::val::function::BytecodeFunction;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_ensure_loaded_missing_file_test_{}.tl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut vm = Vm::new();
+        let file_mod = ModuleId::file(&path);
+        let func = Val::BytecodeFunction(BytecodeFunction {
+            module: ModuleId::USER,
+            name: None,
+            parameters: vec![],
+            instructions: [Instruction::EnsureLoaded(file_mod), Instruction::Return].into(),
+        });
+        assert_eq!(
+            vm.eval(func, []),
+            Err(VmError::ModuleLoadError {
+                path: path.clone(),
+                error: Box::new(VmError::IoError(IoError::ReadFile {
+                    path,
+                    kind: std::io::ErrorKind::NotFound,
+                })),
             })
         );
+    }
+
+    #[test]
+    fn import_loads_file_module_from_disk() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "takolisp_import_loads_file_test_{}.tl",
+            std::process::id()
+        ));
+        std::fs::write(&path, "(define inc (lambda (x) (+ x 1)))").unwrap();
+
+        let mut vm = Vm::new();
+        let import_src = format!(
+            r#"(import "{}" as m) (m.inc 41)"#,
+            path.to_string_lossy().replace('\\', "\\\\")
+        );
+        let result = vm.eval_str(&import_src);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result, Ok(Val::Int(42)));
+        assert!(vm.module(&ModuleId::file(&path)).unwrap().is_loaded());
     }
 }

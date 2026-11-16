@@ -169,7 +169,8 @@ impl<'a> Compiler<'a> {
                 parameters,
                 body,
             } => self.compile_lambda(name.clone(), parameters.clone(), body)?,
-            AstKind::Import { .. } => {
+            AstKind::Import { module, .. } => {
+                self.push(Instruction::EnsureLoaded(module.clone()));
                 self.compile_const(Val::Nil);
             }
         }
@@ -610,7 +611,11 @@ mod tests {
         );
         assert_eq!(
             instructions,
-            vec![Instruction::PushConst(Val::Nil), Instruction::Return]
+            vec![
+                Instruction::EnsureLoaded(ModuleId::file("path/to/file.tl")),
+                Instruction::PushConst(Val::Nil),
+                Instruction::Return,
+            ]
         );
     }
 
@@ -690,6 +695,7 @@ mod tests {
         assert_eq!(
             instructions,
             vec![
+                Instruction::EnsureLoaded(ModuleId::file("lib/math.tl")),
                 Instruction::PushConst(Val::Nil),
                 Instruction::Lookup(ModuleId::file("lib/math.tl"), "add".into()),
                 Instruction::Return,
