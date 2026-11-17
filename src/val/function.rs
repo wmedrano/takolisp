@@ -64,12 +64,11 @@ pub enum Instruction {
 mod tests {
     use super::*;
 
-    fn noop(_: &[Val]) -> Result<Val, VmError> {
-        Ok(Val::Nil)
-    }
-
     #[test]
     fn native_functions_compare_equal_only_by_identity() {
+        fn noop(_: &[Val]) -> Result<Val, VmError> {
+            Ok(Val::Nil)
+        }
         static FN_A: NativeFunction = NativeFunction::new(noop);
         static FN_B: NativeFunction = NativeFunction::new(noop);
 

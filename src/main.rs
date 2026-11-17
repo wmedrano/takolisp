@@ -13,9 +13,9 @@ fn main() -> rustyline::Result<()> {
                     continue;
                 }
                 rl.add_history_entry(line.as_str())?;
-                // TODO(wmedrano): Improve value and error representations.
+                // TODO(wmedrano): Improve error representations.
                 match vm.eval_str(&line) {
-                    Ok(val) => println!("{val:?}"),
+                    Ok(val) => println!("{val}"),
                     Err(err) => eprintln!("{err:?}"),
                 }
             }
