@@ -4,4 +4,5 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
+rustyline = "19.0.0"
 smol_str = "0.3.7"
