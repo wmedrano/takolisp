@@ -103,6 +103,8 @@ pub enum VmError {
     StackUnderflow,
     StackOverflow,
     NotCallable(Val),
+    MissingArgument,
+    IntegerOverflow,
     InvalidType {
         expected: &'static str,
         actual: Val,

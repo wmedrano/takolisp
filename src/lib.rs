@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     ast::{Ast, AstBuilderError},
-    builtins::PLUS_FN,
+    builtins::{LESS_THAN_FN, MINUS_FN, PLUS_FN},
     compiler::{Compiler, CompilerError},
     module::LoadState,
     val::{IoError, Val, VmError, function::Instruction},
@@ -83,6 +83,8 @@ impl Vm {
         let mut vm = Vm::default();
         let mut global_module = Module::new(ModuleId::GLOBAL);
         global_module.insert("+", Val::NativeFunction(&PLUS_FN));
+        global_module.insert("-", Val::NativeFunction(&MINUS_FN));
+        global_module.insert("<", Val::NativeFunction(&LESS_THAN_FN));
         vm.modules.insert(ModuleId::GLOBAL, global_module);
         vm.module_or_init(&ModuleId::USER);
         vm
